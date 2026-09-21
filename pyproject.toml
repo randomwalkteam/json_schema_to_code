@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "json_schema_to_code"
-version = "1.1.5"
+version = "1.1.6"
 description = "Generate strongly-typed classes from JSON Schema definitions for Python, C# and Swift"
 readme = "README.md"
 requires-python = ">=3.12"

@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.6] - 2026-09-21
+
+### Fixed
+
+- **Swift and C# merges survive non-ASCII text.** Tree-sitter reports UTF-8 byte offsets, but the mergers sliced and spliced the Python `str` with them, so every position after a multi-byte character (`—`, `×`, `é`, …, in a comment or a string) landed that many characters too late. A Swift file with such a comment above a hand-written declaration failed to merge (`nonisolated struct` came out as `ated struct` — "syntax error near 'ated'"); a C# custom member after one was silently dropped. All offsets now go through `TreeSitterMerger._start` / `_end`, which map bytes to characters.
+
 ## [1.1.5] - 2026-09-09
 
 ### Fixed
