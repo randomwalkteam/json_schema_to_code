@@ -572,6 +572,45 @@ class TestCSharpMerger:
             # Also acceptable if the import itself fails
             pytest.skip("tree-sitter-c-sharp not installed")
 
+    def test_csharp_merge_preserves_custom_code_after_non_ascii_text(self):
+        """Regression: tree-sitter offsets are UTF-8 bytes, so every custom member after
+        a multi-byte character was sliced a few characters off."""
+        try:
+            from json_schema_to_code.pipeline.merger import CSharpAstMerger
+        except (CodeMergeError, ImportError):
+            pytest.skip("tree-sitter-c-sharp not installed")
+
+        generated = """
+using System;
+using Newtonsoft.Json;
+
+namespace Test {
+    public class Note {
+        [JsonProperty("name")]
+        public string Name { get; set; }
+    }
+}
+"""
+        existing = """
+using System;
+using Newtonsoft.Json;
+
+namespace Test {
+    /// Clé — do → ré.
+    public class Note {
+        [JsonProperty("name")]
+        public string Name { get; set; }
+
+        // Solfège — « do ré mi ».
+        public string Describe() { return "é" + Name; }
+    }
+}
+"""
+        merged = CSharpAstMerger().merge_files(generated, existing, MergeStrategy.MERGE)
+
+        assert "// Solfège — « do ré mi ».\n" in merged
+        assert 'public string Describe() { return "é" + Name; }' in merged
+
     def test_csharp_merge_does_not_duplicate_properties(self):
         """Regression: merging with corrupted file (duplicate property) must not preserve duplicate."""
         try:

@@ -163,6 +163,20 @@ def test_merge_preserves_custom_code():
     _swiftc_typecheck(merged)
 
 
+def test_merge_preserves_custom_code_after_non_ascii_text():
+    """Regression: tree-sitter offsets are UTF-8 bytes. Slicing the str with them
+    shifted every custom declaration after a multi-byte character, turning
+    ``nonisolated struct`` into ``ated struct`` and failing the merge."""
+    generated = _gen(BASIC_SCHEMA, "TestClass")
+    existing = generated.replace("import Foundation", "import Foundation\n\n/// Keys — bounded × 3 octaves; flats → sharps.", 1)
+    existing += "\n/// Pitch class — sharp spelling.\n" 'nonisolated struct Helper: Hashable, Sendable {\n    let label = "é"\n}\n'
+
+    merged = SwiftAstMerger().merge_files(generated, existing, MergeStrategy.MERGE)
+
+    assert 'nonisolated struct Helper: Hashable, Sendable {\n    let label = "é"\n}' in merged
+    _swiftc_typecheck(merged)
+
+
 def test_native_primitive_spellings_map_to_swift():
     """Base-class fields surface native spellings (int/bool/float/str), not JSON Schema names."""
     backend = SwiftAstBackend(CodeGeneratorConfig())

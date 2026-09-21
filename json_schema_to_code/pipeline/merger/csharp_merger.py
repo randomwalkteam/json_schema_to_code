@@ -431,8 +431,7 @@ class CSharpAstMerger(TreeSitterMerger):
         """Get member source text including preceding comment nodes."""
         if not comment_nodes:
             return self._text(member_node, code)
-        start = comment_nodes[0].start_byte
-        return code[start : member_node.end_byte]
+        return code[self._start(comment_nodes[0], code) : self._end(member_node, code)]
 
     # -- No-merge and attribute helpers --
 
@@ -450,8 +449,8 @@ class CSharpAstMerger(TreeSitterMerger):
 
     def _get_text_with_preceding_attributes(self, prev_attr_nodes: list, member_node: Any, code: str) -> str:
         """Get member source text including preceding attribute_list nodes and trailing comments."""
-        start = prev_attr_nodes[0].start_byte if prev_attr_nodes else member_node.start_byte
-        line_end = code.find("\n", member_node.end_byte)
+        start = self._start(prev_attr_nodes[0] if prev_attr_nodes else member_node, code)
+        line_end = code.find("\n", self._end(member_node, code))
         end = line_end if line_end != -1 else len(code)
         return code[start:end]
 
@@ -496,12 +495,12 @@ class CSharpAstMerger(TreeSitterMerger):
                 if member.type == "property_declaration":
                     name = self._get_property_name(member, merged_code)
                     if name and name in prop_overrides:
-                        start = prev_attr_nodes[0].start_byte if prev_attr_nodes else member.start_byte
-                        replacements.append((start, member.end_byte, prop_overrides[name]))
+                        start = self._start(prev_attr_nodes[0] if prev_attr_nodes else member, merged_code)
+                        replacements.append((start, self._end(member, merged_code), prop_overrides[name]))
 
                 elif member.type == "constructor_declaration" and ctor_overrides:
                     if self._count_constructor_params(member) > 0:
-                        replacements.append((member.start_byte, member.end_byte, ctor_overrides.pop(0)))
+                        replacements.append((self._start(member, merged_code), self._end(member, merged_code), ctor_overrides.pop(0)))
 
                 prev_attr_nodes = []
 
@@ -540,15 +539,16 @@ class CSharpAstMerger(TreeSitterMerger):
                 key = self._member_key(member, merged_code, class_name)
                 if key and key in class_comments:
                     insert_before = prev_attr_nodes[0] if prev_attr_nodes else member
-                    line_start = merged_code.rfind("\n", 0, insert_before.start_byte)
+                    insert_at = self._start(insert_before, merged_code)
+                    line_start = merged_code.rfind("\n", 0, insert_at)
                     indent = ""
                     if line_start >= 0:
-                        raw = merged_code[line_start + 1 : insert_before.start_byte]
+                        raw = merged_code[line_start + 1 : insert_at]
                         if raw.isspace() or raw == "":
                             indent = raw
 
                     comment_lines = "\n".join(indent + c.strip() for c in class_comments[key]) + "\n"
-                    insertions.append((insert_before.start_byte, comment_lines))
+                    insertions.append((insert_at, comment_lines))
 
                 prev_attr_nodes = []
 

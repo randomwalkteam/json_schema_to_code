@@ -9,9 +9,20 @@ position at which custom imports are re-inserted after the generated ones.
 from __future__ import annotations
 
 import importlib
+from functools import lru_cache
 from typing import Any
 
 from .base import AstMerger, CodeMergeError
+
+
+@lru_cache(maxsize=8)
+def _char_offsets(code: str) -> tuple[int, ...]:
+    """Character index of every UTF-8 byte offset of ``code`` (and of its end)."""
+    offsets: list[int] = []
+    for index, char in enumerate(code):
+        offsets.extend([index] * len(char.encode("utf8")))
+    offsets.append(len(code))
+    return tuple(offsets)
 
 
 class TreeSitterMerger(AstMerger):
@@ -58,8 +69,18 @@ class TreeSitterMerger(AstMerger):
     def _top_level(self, root: Any, node_type: str) -> list[Any]:
         return [c for c in root.children if c.type == node_type]
 
+    # Tree-sitter positions are UTF-8 byte offsets; ``code`` is a str indexed by
+    # character. Index ``code`` only through these, never with ``start_byte`` /
+    # ``end_byte`` directly: they drift past every multi-byte character.
+
+    def _start(self, node: Any, code: str) -> int:
+        return _char_offsets(code)[node.start_byte]
+
+    def _end(self, node: Any, code: str) -> int:
+        return _char_offsets(code)[node.end_byte]
+
     def _text(self, node: Any, code: str) -> str:
-        return code[node.start_byte : node.end_byte]
+        return code[self._start(node, code) : self._end(node, code)]
 
     def _last_line(self, root: Any, node_type: str) -> int | None:
         """Zero-based line on which the last ``node_type`` node ends, or None if there is none.
