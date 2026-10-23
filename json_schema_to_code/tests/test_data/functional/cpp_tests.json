@@ -1,0 +1,208 @@
+[
+  {
+    "name": "cpp_basic_struct",
+    "description": "C++ struct: primitives, optional, defaults, array, map, enum field, reserved keyword",
+    "config": {
+      "use_inline_unions": true
+    },
+    "schema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "definitions": {
+        "Color": {
+          "type": "string",
+          "enum": [
+            "red",
+            "green",
+            "blue_ish"
+          ]
+        },
+        "TestClass": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "integer"
+            },
+            "ratio": {
+              "type": "number"
+            },
+            "is_active": {
+              "type": "boolean",
+              "default": true
+            },
+            "nickname": {
+              "oneOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "tags": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "links": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "integer"
+              }
+            },
+            "color": {
+              "$ref": "#/definitions/Color",
+              "default": "red"
+            },
+            "class": {
+              "type": "string",
+              "default": "x"
+            }
+          },
+          "required": [
+            "id",
+            "ratio",
+            "links"
+          ]
+        }
+      }
+    },
+    "expected_cpp": [
+      "#pragma once",
+      "#include <nlohmann/json.hpp>",
+      "enum class Color {",
+      "BlueIsh,",
+      "case Color::BlueIsh: j = \"blue_ish\"; return;",
+      "struct TestClass {",
+      "std::int64_t id{};",
+      "double ratio{};",
+      "bool is_active = true;",
+      "std::optional<std::string> nickname;",
+      "std::vector<std::string> tags{};",
+      "std::map<std::string, std::int64_t> links{};",
+      "Color color = Color::Red;",
+      "std::string class_ = \"x\";",
+      "bool operator==(const TestClass&) const = default;",
+      "j.at(\"id\").get_to(v.id);",
+      "if (const auto it = j.find(\"is_active\"); it != j.end()) it->get_to(v.is_active);",
+      "j[\"class\"] = v.class_;"
+    ]
+  },
+  {
+    "name": "cpp_allof_flatten",
+    "description": "C++: plain allOf inheritance flattens base fields into the child struct (no enum)",
+    "config": {
+      "use_inline_unions": true
+    },
+    "schema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "definitions": {
+        "Base": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string"
+            },
+            "shared": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        "Child": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Base"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "extra": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "extra"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    "expected_cpp": [
+      "struct Base {",
+      "struct Child {",
+      "std::string kind{};",
+      "std::string extra{};",
+      "std::optional<std::int64_t> shared;"
+    ]
+  },
+  {
+    "name": "cpp_discriminated_union",
+    "description": "C++: oneOf with discriminator becomes a std::variant dispatching on the key",
+    "config": {
+      "use_inline_unions": true
+    },
+    "schema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "definitions": {
+        "ImageWidget": {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "image"
+            },
+            "url": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "url"
+          ]
+        },
+        "TextWidget": {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "text"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "text"
+          ]
+        },
+        "Widget": {
+          "oneOf": [
+            {
+              "$ref": "#/definitions/ImageWidget"
+            },
+            {
+              "$ref": "#/definitions/TextWidget"
+            }
+          ],
+          "discriminator": {
+            "propertyName": "type"
+          }
+        }
+      }
+    },
+    "expected_cpp": [
+      "using Widget = std::variant<ImageWidget, TextWidget>;",
+      "struct ImageWidget {",
+      "std::string type = \"image\";",
+      "const auto& discriminator = j.at(\"type\");",
+      "if (discriminator == \"image\") {",
+      "v = j.get<ImageWidget>();",
+      "std::visit([&j](const auto& alternative) { j = alternative; }, v);"
+    ]
+  }
+]

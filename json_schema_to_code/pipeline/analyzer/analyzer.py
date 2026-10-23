@@ -45,6 +45,11 @@ except ImportError:
     ValidationGenerator = None
 
 
+# Languages without class inheritance in their generated model: allOf bases are flattened
+# into each struct and discriminated bases become sum types (Swift enum, C++ std::variant).
+FLATTENING_LANGUAGES = ("swift", "cpp")
+
+
 class SchemaAnalyzer:
     """Analyzes schema AST and builds IR."""
 
@@ -162,7 +167,7 @@ class SchemaAnalyzer:
             # Handle anyOf/oneOf discriminated unions (C# and Swift)
             # For anyOf/oneOf with all $refs, the union type becomes a polymorphic base
             # (a base class in C#, a discriminated enum in Swift).
-            if self.language in ("cs", "swift") and isinstance(def_node.body, UnionNode):
+            if self.language in ("cs", *FLATTENING_LANGUAGES) and isinstance(def_node.body, UnionNode):
                 self._process_union_discriminated_type(def_node)
 
     def _process_allof_inheritance(self, def_node: DefinitionNode) -> None:
@@ -365,7 +370,7 @@ class SchemaAnalyzer:
             self.type_aliases[class_name] = alias
 
             # For C#/Swift, we still generate a polymorphic base if discriminated
-            if self.language in ("cs", "swift") and class_name in self.subclasses:
+            if self.language in ("cs", *FLATTENING_LANGUAGES) and class_name in self.subclasses:
                 disc_prop = self.discriminator_property_by_base.get(class_name, "type")
                 return ClassDef(
                     name=class_name,
@@ -416,7 +421,7 @@ class SchemaAnalyzer:
             # Swift has no multiple inheritance: mixin ($ref beyond the first) properties
             # are flattened into the struct. _analyze_properties (not the base-properties
             # path) so schema defaults survive into the generated decode.
-            if self.language == "swift":
+            if self.language in FLATTENING_LANGUAGES:
                 extra_def = self.ref_resolver.get_definition(extra_ref.ref_path.split("/")[-1])
                 if extra_def and isinstance(extra_def.body, ObjectNode):
                     class_def.base_fields += self._analyze_properties(extra_def.body, class_name)
@@ -497,7 +502,7 @@ class SchemaAnalyzer:
             # survive for the decode to stay lenient (decodeIfPresent ?? default).
             # C#/Python keep base fields as constructor params, where a default
             # would change signatures — leave them untouched.
-            if self.language == "swift" and base_prop.has_default and base_prop.default_value is not None:
+            if self.language in FLATTENING_LANGUAGES and base_prop.has_default and base_prop.default_value is not None:
                 field_def.has_default = True
                 field_def.default_value = base_prop.default_value
 
@@ -696,7 +701,7 @@ class SchemaAnalyzer:
             # Same as _analyze_base_properties: Swift needs the schema default so
             # the flattened field decodes leniently. `default: null` is treated as
             # no-default — the field then falls back to optional decoding.
-            if self.language == "swift" and prop_schema.get("default") is not None:
+            if self.language in FLATTENING_LANGUAGES and prop_schema.get("default") is not None:
                 field_def.has_default = True
                 field_def.default_value = prop_schema["default"]
 
@@ -777,22 +782,22 @@ class SchemaAnalyzer:
         subclasses = self.subclasses.get(class_name, [])
         disc_prop = self.discriminator_property_by_base.get(class_name, "type") if subclasses else None
         # If no subclasses in same schema, still respect discriminator on this definition (polymorphic base in another file)
-        if disc_prop is None and self.language in ("cs", "swift"):
+        if disc_prop is None and self.language in ("cs", *FLATTENING_LANGUAGES):
             defs = self.ast.raw_schema.get("$defs") or self.ast.raw_schema.get("definitions") or {}
             raw_def = defs.get(def_node.original_name, {})
             if isinstance(raw_def, dict) and "discriminator" in raw_def:
                 disc_prop = raw_def.get("discriminator", {}).get("propertyName", "type")
         # Cross-schema known subtypes declared via x-csharp-known-subtypes
-        # (Swift reads x-swift-known-subtypes first, falling back to the C# key).
+        # (Swift / C++ read x-swift- / x-cpp-known-subtypes first, falling back to the C# key).
         external_subtypes = []
         subtype_usings = []
-        if self.language in ("cs", "swift"):
+        if self.language in ("cs", *FLATTENING_LANGUAGES):
             defs = defs if "defs" in dir() else (self.ast.raw_schema.get("$defs") or self.ast.raw_schema.get("definitions") or {})
             raw_def = defs.get(def_node.original_name, {}) if isinstance(defs, dict) else {}
             known = None
             if isinstance(raw_def, dict):
-                if self.language == "swift":
-                    known = raw_def.get("x-swift-known-subtypes")
+                if self.language in FLATTENING_LANGUAGES:
+                    known = raw_def.get(f"x-{self.language}-known-subtypes")
                 if not known:
                     known = raw_def.get("x-csharp-known-subtypes", [])
             for entry in known or []:

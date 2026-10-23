@@ -2,7 +2,7 @@
 
 ## Project overview
 
-**json_schema_to_code** generates strongly-typed classes from JSON Schema definitions for Python, C# and Swift. It uses a five-phase AST-based pipeline: parse, analyze, generate AST, serialize, format/merge.
+**json_schema_to_code** generates strongly-typed classes from JSON Schema definitions for Python, C#, Swift and C++. It uses a five-phase AST-based pipeline: parse, analyze, generate AST, serialize, format/merge.
 
 - **Stack**: Python 3.12+, Click (CLI), ruff (formatting), tree-sitter (C# / Swift merge parsing)
 - **Entry point**: `json_schema_to_code` CLI command (defined in `pyproject.toml`)
@@ -25,6 +25,8 @@
 | C# backend | `json_schema_to_code/pipeline/ast_backends/csharp_ast_backend.py` |
 | C# serializer | `json_schema_to_code/pipeline/ast_backends/csharp_serializer.py` |
 | Swift backend | `json_schema_to_code/pipeline/ast_backends/swift_ast_backend.py` |
+| C++ backend | `json_schema_to_code/pipeline/ast_backends/cpp_ast_backend.py` |
+| C++ serializer | `json_schema_to_code/pipeline/ast_backends/cpp_serializer.py` |
 | Merger base | `json_schema_to_code/pipeline/merger/base.py` |
 | Python merger | `json_schema_to_code/pipeline/merger/python_merger.py` |
 | Tree-sitter merger base | `json_schema_to_code/pipeline/merger/tree_sitter_merger.py` |
@@ -43,7 +45,7 @@ json_schema_to_code <schema.json> <output_file> [options]
 # Options:
 #   --name, -n        Root class name (default: schema filename stem)
 #   --config, -c      JSON config file path
-#   --language, -l    Target language: "cs" (default), "python" or "swift"
+#   --language, -l    Target language: "cs" (default), "python", "swift" or "cpp"
 #   --add-validation  Add runtime validation code
 #   --merge-strategy  "error" | "merge" | "delete"
 ```
@@ -93,7 +95,7 @@ json_schema_to_code <schema.json> <output_file> [options]
 - `translate_type(type_ref: TypeRef) -> str`
 - `format_default_value(value: Any, type_ref: TypeRef) -> str`
 
-**Backends**: `PythonAstBackend`, `CSharpAstBackend`, `SwiftAstBackend`. Each reads its own key from `TypeRef.type_overrides` (`python`, `csharp`, `swift`) in `translate_type`.
+**Backends**: `PythonAstBackend`, `CSharpAstBackend`, `SwiftAstBackend`, `CppAstBackend`. Each reads its own key from `TypeRef.type_overrides` (`python`, `csharp`, `swift`, `cpp`) in `translate_type`. Swift and C++ have no inheritance in their model: the analyzer flattens `allOf` bases for both (`FLATTENING_LANGUAGES`), and discriminated bases become a Swift enum / a C++ `std::variant`.
 
 The Python backend decides defaults from the IR alone: a non-required class-typed field gets `field(default_factory=lambda: X())` only when `X` is empty-constructible (every field, inherited ones included, has a default; enums never are), else `None` with the annotation widened to `X | None`. The IR is not mutated for this.
 
@@ -130,6 +132,9 @@ The Python backend decides defaults from the IR alone: a non-required class-type
 | `add_validation` | `bool` | `false` | Add runtime validation |
 | `swift_conformances` | `list[str]` | `["Codable"]` | Protocols generated Swift types conform to |
 | `swift_nonisolated` | `bool` | `false` | Prefix generated Swift types with `nonisolated` |
+| `cpp_namespace` | `str` | `""` | Namespace wrapping generated C++ declarations |
+| `cpp_json_include` | `str` | `"<nlohmann/json.hpp>"` | nlohmann/json include directive |
+| `cpp_additional_includes` | `list[str]` | `[]` | Extra C++ includes |
 | `external_ref_base_module` | `str` | `""` | Base module for external `$ref` imports (Python) |
 | `external_ref_schema_to_module` | `dict[str,str]` | `{}` | Schema path -> module mapping |
 | `csharp_namespace` | `str` | `""` | C# namespace |
@@ -302,6 +307,7 @@ The analyzer raises fatal errors for invalid schema patterns:
 | `test_optional_field_defaults.py`, `test_omit_when_default.py`, `test_python_base_and_type_overrides.py` | Python runtime behaviour, by executing the generated module |
 | `test_external_base_class_imports.py` | External `$ref` import resolution |
 | `test_csharp_ast_roundtrip.py`, `test_swift_ast_roundtrip.py` | tree-sitter parsing and merging |
+| `v3/test_cpp_backend.py` | C++ output shapes, plus compiling the generated header with `-Werror` and round-tripping JSON (needs a C++20 compiler and nlohmann/json: found via `NLOHMANN_JSON_INCLUDE`, the conda prefixes or the usual system paths, skipped otherwise) |
 | `test_config_from_dict.py`, `test_import_sorting.py` | Config loading, ruff isort pass |
 | `test_validation_rules.py` | Validation rule generation |
 | `test_cli_utils.py` | CLI utility functions |

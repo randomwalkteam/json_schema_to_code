@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **C++ backend (`--language cpp`).** Generates a header-only file of C++20 aggregate structs serialized with nlohmann/json `to_json` / `from_json`. The model is Swift's: `allOf` bases are flattened, discriminated bases become `std::variant` aliases dispatched on the discriminator key, enums map explicitly and throw on unknown values, and decoding is lenient (absent keys keep defaults, non-required fields are `std::optional`). Types are ordered by by-value dependencies; a by-value cycle is a clear error. Configured by `cpp_namespace`, `cpp_json_include` and `cpp_additional_includes`; `x-cpp-type` and `x-cpp-known-subtypes` work like their Swift counterparts. The test compiles the generated header with `-Werror` and round-trips real JSON.
+
 ## [1.1.6] - 2026-09-21
 
 ### Fixed

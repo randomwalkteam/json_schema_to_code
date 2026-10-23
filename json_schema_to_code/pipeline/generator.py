@@ -12,7 +12,7 @@ from typing import Any
 from .. import __version__
 from ..cli_utils import reconstruct_command_line
 from .analyzer import SchemaAnalyzer
-from .ast_backends import AstBackend, CSharpAstBackend, PythonAstBackend, SwiftAstBackend
+from .ast_backends import AstBackend, CppAstBackend, CSharpAstBackend, PythonAstBackend, SwiftAstBackend
 from .config import CodeGeneratorConfig, OutputMode
 from .formatters import RuffFormatter
 from .merger import AtomicWriter, CodeMergeError, PythonAstMerger
@@ -45,7 +45,7 @@ class PipelineGenerator:
             class_name: Name for the root class
             schema: The JSON Schema dictionary
             config: Code generation configuration
-            language: Target language ("python" or "cs")
+            language: Target language ("python", "cs", "swift" or "cpp")
         """
         self.class_name = class_name
         self.schema = schema
@@ -66,6 +66,8 @@ class PipelineGenerator:
             return CSharpAstBackend(self.config)
         elif self.language == "swift":
             return SwiftAstBackend(self.config)
+        elif self.language == "cpp":
+            return CppAstBackend(self.config)
         else:
             raise ValueError(f"Unsupported language: {self.language}")
 
@@ -141,7 +143,9 @@ class PipelineGenerator:
             final_code = generated_code
 
         elif mode == OutputMode.MERGE:
-            if output_path.exists():
+            # C++ headers are fully generated (no custom-code sections): extend the types
+            # in a separate header, so merging is a plain overwrite.
+            if output_path.exists() and self.language != "cpp":
                 existing_code = output_path.read_text(encoding="utf-8")
                 merger = self._create_merger()
                 try:
@@ -180,8 +184,8 @@ class PipelineGenerator:
         """Get the language string for the atomic writer."""
         if self.language == "python":
             return "python"
-        if self.language == "swift":
-            return "swift"
+        if self.language in ("swift", "cpp"):
+            return self.language
         return "cs"
 
     def _create_merger(self):

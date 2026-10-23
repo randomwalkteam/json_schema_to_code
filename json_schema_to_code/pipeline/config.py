@@ -108,6 +108,15 @@ class CodeGeneratorConfig:
     # Prefix generated Swift types with `nonisolated` (strict-concurrency projects)
     swift_nonisolated: bool = False
 
+    # Namespace wrapping the generated C++ declarations ("" for the global namespace)
+    cpp_namespace: str = ""
+
+    # Include directive for nlohmann/json in generated C++ headers
+    cpp_json_include: str = "<nlohmann/json.hpp>"
+
+    # Extra includes for generated C++ headers (e.g. headers declaring x-cpp-type types)
+    cpp_additional_includes: list[str] = field(default_factory=list)
+
     # Types to quote for Python (forward references)
     quoted_types_for_python: list[str] = field(default_factory=list)
 

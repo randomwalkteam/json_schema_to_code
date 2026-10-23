@@ -9,7 +9,7 @@ from .pipeline import CodeGeneratorConfig, MergeStrategy, PipelineGenerator
 @click.command()
 @click.option("--name", "-n", default=None, type=str)
 @click.option("--config", "-c", default=None, type=click.Path(exists=True, resolve_path=True))
-@click.option("--language", "-l", default="cs", type=click.Choice(["cs", "python", "swift"]))
+@click.option("--language", "-l", default="cs", type=click.Choice(["cs", "python", "swift", "cpp"]))
 @click.option(
     "--add-validation",
     is_flag=True,

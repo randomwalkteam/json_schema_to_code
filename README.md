@@ -1,10 +1,10 @@
 # JSON Schema to Code Generator
 
-A Python package that generates strongly-typed classes from JSON Schema definitions. Supports code generation for **Python**, **C#** and **Swift** with full inheritance, polymorphism, and type safety.
+A Python package that generates strongly-typed classes from JSON Schema definitions. Supports code generation for **Python**, **C#**, **Swift** and **C++** with full inheritance, polymorphism, and type safety.
 
 ## Features
 
-- **Multi-language support**: Python dataclasses, C# classes, and Swift `Codable` structs
+- **Multi-language support**: Python dataclasses, C# classes, Swift `Codable` structs, and C++20 structs with nlohmann/json serialization
 - **Full JSON Schema compliance**: Supports definitions, references, inheritance (`allOf`), enums, and complex types
 - **Type safety**: Generates strongly-typed code with proper nullable handling
 - **Inheritance and polymorphism**: Handles base classes and subclass discrimination
@@ -48,6 +48,9 @@ json_schema_to_code schema.json output.py --language python
 # Generate Swift Codable structs
 json_schema_to_code schema.json output.swift --language swift
 
+# Generate a C++ header (C++20 structs + nlohmann/json)
+json_schema_to_code schema.json output.hpp --language cpp
+
 # Use a configuration file
 json_schema_to_code schema.json output.cs --config config.json
 
@@ -59,7 +62,7 @@ json_schema_to_code schema.json output.cs --name MyRootClass
 
 - `path`: Input JSON Schema file (required)
 - `output`: Output file path (required)
-- `--language, -l`: Target language (`cs`, `python` or `swift`, default: `cs`)
+- `--language, -l`: Target language (`cs`, `python`, `swift` or `cpp`, default: `cs`)
 - `--config, -c`: Configuration file path (optional)
 - `--name, -n`: Root class name (optional, defaults to schema filename)
 - `--add-validation`: Add runtime validation in `__post_init__` (Python) or the constructor (C#)
@@ -123,6 +126,12 @@ Unknown keys are skipped with a warning, so a config file can carry options for 
 - **`swift_conformances`** (default `["Codable"]`): Protocols the generated structs and enums conform to, e.g. `["Decodable", "Hashable", "Sendable"]` for a decode-only, strict-concurrency project
 - **`swift_nonisolated`** (default `false`): Prefix generated types with `nonisolated`, and restate it on the `init(from:)` extension — needed under default-MainActor isolation
 
+**C++ specifics**
+
+- **`cpp_namespace`** (default `""`): Namespace wrapping the generated declarations, e.g. `"montage::model"`
+- **`cpp_json_include`** (default `"<nlohmann/json.hpp>"`): Include directive for nlohmann/json
+- **`cpp_additional_includes`** (default `[]`): Extra includes, e.g. the header declaring an `x-cpp-type`
+
 **External references**
 
 - **`schema_base_path`**: Base directory for resolving external `$ref` paths from disk
@@ -158,7 +167,7 @@ Unknown keys are skipped with a warning, so a config file can carry options for 
 - **Const values**: Fixed literal values
 - **Optional properties**: Nullable type generation
 - **Custom enum member names**: Use `x-enum-members` to specify custom enum member names
-- **Verbatim types**: `x-python-type`, `x-csharp-type` and `x-swift-type` name the type to emit for that language instead of the inferred one (see below)
+- **Verbatim types**: `x-python-type`, `x-csharp-type`, `x-swift-type` and `x-cpp-type` name the type to emit for that language instead of the inferred one (see below)
 - **Omit-when-default fields**: `x-omit-when-default` leaves a Python field out of the JSON while it still holds its default (see below)
 - **Constructor defaults**: `x-python-default`, `x-python-default-code` and `x-python-imports` give a field a Python constructor default while `required` keeps describing the wire (see below)
 
@@ -193,7 +202,7 @@ class ElementState(str, Enum):
 
 **Note**: `x-enum-members` maps enum values (the keys) to member names (the values). All three languages honour it: C# additionally emits a `JsonConverter` mapping the members back to their string values, and Swift lower-camels the member names (`CORRECT_ANSWER` becomes `case correctAnswer`).
 
-### Verbatim Types (`x-python-type`, `x-csharp-type`, `x-swift-type`)
+### Verbatim Types (`x-python-type`, `x-csharp-type`, `x-swift-type`, `x-cpp-type`)
 
 Any schema node can name the type a language should emit for it, verbatim, when the inferred one is not what the code needs: a `$ref` to a scalar `$def` (no class is generated for it), a payload the language's JSON library cannot decode as the inferred union, a hand-written type living elsewhere. Each backend reads only its own key, so the three can sit side by side; nullability still comes from the schema.
 
@@ -205,7 +214,7 @@ Any schema node can name the type a language should emit for it, verbatim, when 
 }
 ```
 
-Python: `when: datetime`, `digest: str`. C#: `public DateTime When`. Swift: `let when: Date`, `var widgets: [NamedWidget] = []`. For Swift a property-level override ending in `?` is decoded leniently (`decodeIfPresent`), and a default survives only for empty container literals.
+Python: `when: datetime`, `digest: str`. C#: `public DateTime When`. Swift: `let when: Date`, `var widgets: [NamedWidget] = []`. For Swift a property-level override ending in `?` is decoded leniently (`decodeIfPresent`), and a default survives only for empty container literals. C++ follows the same rules with `std::optional<...>` overrides and `{}` defaults.
 
 A Python override naming a type that lives elsewhere brings its import via `x-python-imports` (which stands on its own — no constructor default required):
 
@@ -365,6 +374,33 @@ extension Circle {
 }
 ```
 
+### Generated C++ Code
+```cpp
+struct Circle {
+    std::string type = "circle";
+    double radius{};
+
+    bool operator==(const Circle&) const = default;
+};
+
+using Shape = std::variant<Circle, Square>;
+
+inline void from_json(const nlohmann::json& j, Circle& v) {
+    if (const auto it = j.find("type"); it != j.end()) it->get_to(v.type);
+    j.at("radius").get_to(v.radius);
+}
+
+inline void from_json(const nlohmann::json& j, Shape& v) {
+    const auto& discriminator = j.at("type");
+    if (discriminator == "circle") {
+        v = j.get<Circle>();
+        return;
+    }
+    // ...
+    throw std::invalid_argument("unknown discriminator " + discriminator.dump() + " for Shape");
+}
+```
+
 ## Python API Usage
 
 ```python
@@ -411,6 +447,16 @@ with open('output.py', 'w') as f:
 - **Decoding is deliberately lenient**: a field with a schema default emits as `var x = default` plus `decodeIfPresent ?? default`, and a non-required field with neither default nor nullability becomes optional. One absent or unexpected field cannot throw away an entire payload — which matters when the server is free to add fields ahead of the client.
 - Defaults declared on a base class survive `allOf` flattening, including across external `$ref`s (Swift only; C#/Python constructor signatures are untouched)
 
+### C++ Output
+- A single header-only file of C++20 aggregate structs with default member initializers and a defaulted `operator==`; needs nlohmann/json 3.11+
+- Same model as Swift: `allOf` bases are flattened, discriminated bases become `using Base = std::variant<...>` dispatched on the discriminator key
+- Members are named after the JSON keys (sanitized: `content-type` becomes `content_type`, keywords get a trailing `_`), so the struct reads like the payload
+- Enums become `enum class` with an explicit mapping; an unknown value or discriminator throws `std::invalid_argument` instead of decoding silently to a default
+- Decoding is lenient like Swift: absent keys keep the member's default, non-required fields without a default are `std::optional`, nullable fields are `std::optional` written as `null`
+- Untyped values (`object` without properties, heterogeneous unions) are `nlohmann::json`; dict defaults on a struct field use designated initializers
+- Types are emitted in dependency order. A cycle of by-value references (e.g. a node holding an optional node) is an error: make the recursive reference an array (`std::vector` accepts incomplete types) or give it an `x-cpp-type`
+- The header is fully generated, so `output.mode = "merge"` simply overwrites it: extend the types in a separate header
+
 ## Architecture
 
 The generator uses an AST-based pipeline for code generation:
@@ -450,7 +496,8 @@ json_schema_to_code/
 │   │   ├── ast_backends/           # Phases 3-4: language AST + serializers
 │   │   │   ├── python_ast_backend.py
 │   │   │   ├── csharp_ast_backend.py / csharp_serializer.py
-│   │   │   └── swift_ast_backend.py / swift_serializer.py
+│   │   │   ├── swift_ast_backend.py / swift_serializer.py
+│   │   │   └── cpp_ast_backend.py / cpp_serializer.py
 │   │   ├── formatters/             # Phase 5: ruff
 │   │   └── merger/                 # Phase 6: per-language merge + atomic write
 │   │       ├── python_merger.py    #   stdlib ast, order-preserving

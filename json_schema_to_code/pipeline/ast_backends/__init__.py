@@ -8,6 +8,7 @@ instead of template-based string generation.
 from __future__ import annotations
 
 from .base import AstBackend
+from .cpp_ast_backend import CppAstBackend
 from .csharp_ast_backend import CSharpAstBackend
 from .python_ast_backend import PythonAstBackend
 from .swift_ast_backend import SwiftAstBackend
@@ -17,4 +18,5 @@ __all__ = [
     "PythonAstBackend",
     "CSharpAstBackend",
     "SwiftAstBackend",
+    "CppAstBackend",
 ]

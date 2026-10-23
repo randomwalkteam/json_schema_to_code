@@ -124,6 +124,12 @@ def test_functional_generation(test_case):
         for expected in test_case["expected_swift"]:
             assert expected in generated_code, f"Expected pattern '{expected}' not found in Swift output"
 
+    # Test C++ generation if specified
+    if "expected_cpp" in test_case:
+        generated_code = _generate_code(schema, config, "cpp")
+        for expected in test_case["expected_cpp"]:
+            assert expected in generated_code, f"Expected pattern '{expected}' not found in C++ output"
+
     # Test contains patterns if specified
     if "expected_contains" in test_case:
         language = test_case.get("test_language", "python")
