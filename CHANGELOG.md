@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.7] - 2026-10-27
+
+### Fixed
+
+- **An `x-python-type` annotation imports only the classes it names.** A property typed `oneOf: [Drawing, ObjectRef]` with `x-python-type: "Drawing"` was annotated `Drawing`, but every external `$ref` of the `oneOf` still registered its import, so `ObjectRef` was imported and never used. ruff's `--fix` (F401) strips such an import and the next regeneration writes it back, so a "generated file matches its schema" check could never pass alongside the linter. The analyzer now drops, of the external imports registered under an overridden node, those the annotation does not name.
+
 ## [1.1.6] - 2026-09-21
 
 ### Fixed
