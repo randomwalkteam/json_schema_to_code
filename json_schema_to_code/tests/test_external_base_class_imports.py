@@ -342,3 +342,43 @@ def test_a_constructor_default_travels_a_two_hop_external_allof_chain():
     child = code.split("class ChildData")[1]
     assert "state: ChildState = field(default_factory=lambda: ChildState())" in child, code
     assert re.search(r"^\s+problem: ChildProblem\s*$", child, re.M), code
+
+
+OVERRIDDEN_EXTERNAL_UNION_SCHEMA = {
+    "$schema": "https://json-schema.org/draft/2019-09/schema",
+    "$ref": "#/$defs/Exercise",
+    "$defs": {
+        "Exercise": {
+            "type": "object",
+            "properties": {
+                # The schema accepts the drawing or a reference to one; Python only
+                # ever sees the resolved drawing.
+                "drawing": {
+                    "oneOf": [
+                        {"$ref": "/graphics/drawing_schema#/$defs/Drawing"},
+                        {"$ref": "/graphics/drawing_schema#/$defs/ObjectRef"},
+                    ],
+                    "x-python-type": "Drawing",
+                },
+                "call": {"$ref": "/graphics/drawing_schema#/$defs/DrawingCall"},
+            },
+            "required": ["drawing", "call"],
+        },
+    },
+}
+
+
+def test_an_overridden_type_imports_only_the_classes_it_names():
+    """`x-python-type: "Drawing"` over `oneOf [Drawing, ObjectRef]`: the annotation
+    names Drawing, so ObjectRef must not be imported (an unused import a linter's fix
+    strips, which the next regeneration writes back), while Drawing and the other
+    field's DrawingCall still are."""
+    config = CodeGeneratorConfig()
+    config.add_generation_comment = False
+    config.external_ref_base_module = "generated"
+
+    code = PipelineGenerator("Exercise", OVERRIDDEN_EXTERNAL_UNION_SCHEMA, config, "python").generate()
+    module = "generated.graphics.drawing_dataclass"
+    imported = {name for mod, names in extract_imports(code) if mod == module for name in names}
+    assert imported == {"Drawing", "DrawingCall"}, code
+    assert re.search(r"^\s+drawing: Drawing\s*$", code, re.M), code

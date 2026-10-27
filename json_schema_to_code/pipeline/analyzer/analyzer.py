@@ -969,15 +969,29 @@ class SchemaAnalyzer:
         is_required: bool,
     ) -> TypeRef:
         """Analyze a type node and create TypeRef."""
+        overrides = self._type_overrides(node.metadata)
+        imports_before = set(self.python_imports)
         type_ref = self._analyze_type_node(node, field_name, parent_class, is_required)
         # Every node kind takes its overrides here, once: the schema author's
         # `x-<language>-type` wins over whatever the dispatch inferred. A wrapper that
         # collapsed to its inner node's TypeRef (`oneOf: [T, null]`) keeps what that
         # node declared, the wrapper's own keys taking precedence.
-        type_ref.type_overrides = {**type_ref.type_overrides, **self._type_overrides(node.metadata)}
+        type_ref.type_overrides = {**type_ref.type_overrides, **overrides}
+        if "python" in overrides:
+            self._keep_imports_named_by(overrides["python"], imports_before)
         return type_ref
 
     _TYPE_OVERRIDE_KEY = re.compile(r"^x-([a-z]+)-type$")
+    _PYTHON_NAME = re.compile(r"[A-Za-z_]\w*")
+
+    def _keep_imports_named_by(self, annotation: str, imports_before: set[tuple[str, str]]) -> None:
+        """An `x-python-type` annotation imports only the classes it names.
+
+        The `$ref`s it replaces registered their external imports while the node was
+        analyzed; one the annotation does not name is an unused import, which a
+        linter's fix strips and the next regeneration writes back."""
+        named = set(self._PYTHON_NAME.findall(annotation))
+        self.python_imports -= {imp for imp in self.python_imports - imports_before if imp[1] not in named}
 
     def _type_overrides(self, metadata: dict) -> dict[str, str]:
         """`x-python-type` / `x-csharp-type` / `x-swift-type` -> {language: type}."""
