@@ -108,6 +108,16 @@ class CodeGeneratorConfig:
     # Prefix generated Swift types with `nonisolated` (strict-concurrency projects)
     swift_nonisolated: bool = False
 
+    # Swift type for schema `object` / untyped values (a JSON value type the consuming
+    # module provides once, e.g. "AnyCodable" or "JSONValue").
+    swift_any_type: str = "AnyCodable"
+
+    # Decode every struct through `decoder.policyContainer(keyedBy:)`, a container the
+    # consuming module provides, so the module chooses at run time whether a schema
+    # mismatch throws (strict) or falls back (lenient). Discriminated enums gain an
+    # `unknown(type:payload:)` case. See the Swift section of CLAUDE.md for the API.
+    swift_policy_decoding: bool = False
+
     # Types to quote for Python (forward references)
     quoted_types_for_python: list[str] = field(default_factory=list)
 

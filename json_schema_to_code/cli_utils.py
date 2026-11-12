@@ -43,10 +43,10 @@ def reconstruct_command_line(click_command: click.Command) -> str:
         if not value:
             continue
 
-        # Format value (convert file paths to just filenames for cleaner display)
-        if isinstance(value, (str, Path)):
-            path_obj = Path(str(value))
-            formatted_value = path_obj.name if path_obj.exists() else str(value)
+        # A file path shows as its file name: the header must not depend on where the
+        # generator ran, nor on whether the output file existed before this run.
+        if isinstance(param.type, click.Path):
+            formatted_value = Path(str(value)).name
         else:
             formatted_value = str(value)
 

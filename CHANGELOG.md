@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-11-12
+
+### Added
+
+- **Swift policy decoding (`swift_policy_decoding`).** Generated `init(from:)` read through a `policyContainer` the consuming module supplies, so one build can decode strictly (a mismatch with the server throws, for development) and another leniently (a bad value falls back, a bad array element is dropped, for production) from the same generated code. Discriminated enums gain `case unknown(type:payload:)`, a discriminator constant becomes `let type = "X"`, optional properties become `var` (memberwise arguments default to `nil`), and a required nullable property encodes `null` instead of being left out. README §Swift policy decoding documents the API.
+- **`swift_any_type`** names the JSON value type for schema `object` / untyped values (default `AnyCodable`).
+
+### Changed
+
+- **Swift: a union of primitive types is a generated enum.** `"type": ["string", "integer"]`, and a variable-length tuple mixing them, was the opaque `AnyCodable`; it is now `enum IntOrString { case int(Int); case string(String) }`. List the name in `ignore_classes` if the module defines it already.
+- **Swift: discriminated enum cases drop the subtypes' shared leading words.** `DHMChatInfo`, `DHMError` become `case chatInfo`, `case error` (was `dHMChatInfo`, `dHMError`).
+
 ## [1.1.7] - 2026-10-27
 
 ### Fixed
