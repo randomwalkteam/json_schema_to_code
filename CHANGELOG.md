@@ -5,17 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.2.0] - 2026-11-12
+## [2.0.0] - 2026-11-12
+
+Major: regenerating existing Swift output changes its types (a primitive union is no longer `AnyCodable`) and its enum case names, which breaks the code that uses them.
 
 ### Added
 
 - **Swift policy decoding (`swift_policy_decoding`).** Generated `init(from:)` read through a `policyContainer` the consuming module supplies, so one build can decode strictly (a mismatch with the server throws, for development) and another leniently (a bad value falls back, a bad array element is dropped, for production) from the same generated code. Discriminated enums gain `case unknown(type:payload:)`, a discriminator constant becomes `let type = "X"`, optional properties become `var` (memberwise arguments default to `nil`), and a required nullable property encodes `null` instead of being left out. README §Swift policy decoding documents the API.
 - **`swift_any_type`** names the JSON value type for schema `object` / untyped values (default `AnyCodable`).
+- **Swift: a required value falls back to the zero of its type** under lenient policy decoding: an enum's first case, a primitive union's first member, `[:]` for a dictionary. A discriminated enum reads its discriminator through the policy container, so a missing one is an unknown subtype.
+- **Swift: a schema type named like a generated union (`IntOrString`) is refused** with an error, instead of producing two declarations of the name.
 
-### Changed
+### Changed (breaking)
 
 - **Swift: a union of primitive types is a generated enum.** `"type": ["string", "integer"]`, and a variable-length tuple mixing them, was the opaque `AnyCodable`; it is now `enum IntOrString { case int(Int); case string(String) }`. List the name in `ignore_classes` if the module defines it already.
-- **Swift: discriminated enum cases drop the subtypes' shared leading words.** `DHMChatInfo`, `DHMError` become `case chatInfo`, `case error` (was `dHMChatInfo`, `dHMError`).
+- **Swift: discriminated enum cases drop the subtypes' shared leading words.** `DHMChatInfo`, `DHMError` become `case chatInfo`, `case error` (was `dHMChatInfo`, `dHMError`). The shared text ends where every name goes on with a capital letter, and a leading acronym is lowered (`DHMURLInfo` → `case urlInfo`).
+
+### Fixed
+
+- **Swift: a default on a primitive union is a case of the union** (`var weight: IntOrString = .int(3)`), not a bare literal that does not compile.
+- **Swift: a type that is only `Encodable` (or only `Decodable`) gets only the coding method it needs**, for discriminated enums as for structs.
 
 ## [1.1.7] - 2026-10-27
 

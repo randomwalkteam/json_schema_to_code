@@ -40,10 +40,6 @@ class TestCliUtils:
         assert "json_schema_to_code" in result
 
 
-if __name__ == "__main__":
-    pytest.main([__file__])
-
-
 def test_header_names_files_the_same_on_first_and_later_runs(tmp_path):
     """The header written into a new output file equals the one a regeneration writes:
     file paths show as file names, whether or not the file existed."""
@@ -64,3 +60,7 @@ def test_header_names_files_the_same_on_first_and_later_runs(tmp_path):
         headers.append(output.read_text().splitlines()[0])
     assert headers[0] == headers[1]
     assert headers[0].endswith(": json_schema_to_code point.json Point.swift --language swift")
+
+
+if __name__ == "__main__":
+    pytest.main([__file__])

@@ -421,15 +421,16 @@ With `swift_policy_decoding`, the generated code leaves the decoding decision to
 
 | Property | Call |
 |---|---|
-| required | `decodeRequired(T.self, forKey:, fallback: x)`, with `x` the schema default or the type's zero value (`""`, `0`, `false`); without `fallback:` for a generated type |
+| required | `decodeRequired(T.self, forKey:, fallback: x)`, with `x` the schema default or the type's zero value (`""`, `0`, `false`, `[:]`, an enum's first case, a primitive union's first member holding its zero value); without `fallback:` for a generated struct, a discriminated enum and the JSON value type |
 | required, nullable | `decodeRequired(T?.self, forKey:, fallback: nil)`, and an `encode(to:)` that writes `null` |
-| required array | `decodeRequiredArray(E.self, forKey:)` |
+| required array | `decodeRequiredArray(E.self, forKey:)`, or `decodeRequiredArray(E.self, forKey:, fallback: x)` with a schema default |
+| required nullable array | `decodeRequiredArray(E.self, forKey:, fallback: nil)` |
 | optional | `decodeOptional(T.self, forKey:)`, or `decodeOptional(T.self, forKey:, default: x)` |
 | optional array | `decodeOptionalArray(E.self, forKey:)`, or with `default:` |
 
-A discriminator constant is `let type: String = "X"`, encoded but never decoded. Optional properties are `var`, so the memberwise initializer defaults them to `nil`. A discriminated enum gains `case unknown(type: String, payload: <swift_any_type>)`, so a subtype the client does not know yet never fails the decode.
+A discriminator constant is `let type: String = "X"`, encoded but never decoded. Optional properties are `var`, so the memberwise initializer defaults them to `nil`. A discriminated enum gains `case unknown(type: String, payload: <swift_any_type>)`, so a subtype the client does not know yet never fails the decode; it reads its discriminator with `decodeRequired(String.self, forKey:, fallback: "")`, so a lenient decoder takes a missing one as an unknown subtype too. A struct with no property keeps the synthesized decoder.
 
-The project supplies `policyContainer(keyedBy:)` on `Decoder` and a container with these seven methods. A strict container maps them to `decode` / `decodeIfPresent`; a lenient one returns the fallback, `nil` or the default for a missing or bad value, drops bad array elements, and decodes a generated type it cannot read from an empty object. The mimir-ios app's `PolicyDecoding.swift` is a complete implementation, strict in Debug and Staging and lenient in Production.
+The project supplies `policyContainer(keyedBy:)` on `Decoder` and a container with these eight methods (the two `decodeRequired`, the two `decodeOptional`, and the four array variants). A strict container maps them to `decode` / `decodeIfPresent`; a lenient one returns the fallback, `nil` or the default for a missing or bad value, drops bad array elements, and decodes a generated type it cannot read from an empty object. The mimir-ios app's `PolicyDecoding.swift` is a complete implementation, strict in Debug and Staging and lenient in Production.
 
 ## Architecture
 

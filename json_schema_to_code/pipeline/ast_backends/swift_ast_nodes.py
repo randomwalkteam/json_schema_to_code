@@ -16,6 +16,16 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 
+def decodes(conformances: list[str]) -> bool:
+    """Whether a type with these conformances needs ``init(from:)``."""
+    return any(c in ("Codable", "Decodable") for c in conformances)
+
+
+def encodes(conformances: list[str]) -> bool:
+    """Whether a type with these conformances needs ``encode(to:)``."""
+    return any(c in ("Codable", "Encodable") for c in conformances)
+
+
 @dataclass
 class SwiftNode:
     """Base class for all Swift AST nodes."""

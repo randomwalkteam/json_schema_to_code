@@ -115,7 +115,7 @@ class CodeGeneratorConfig:
     # Decode every struct through `decoder.policyContainer(keyedBy:)`, a container the
     # consuming module provides, so the module chooses at run time whether a schema
     # mismatch throws (strict) or falls back (lenient). Discriminated enums gain an
-    # `unknown(type:payload:)` case. See the Swift section of CLAUDE.md for the API.
+    # `unknown(type:payload:)` case. README §Swift policy decoding documents the API.
     swift_policy_decoding: bool = False
 
     # Types to quote for Python (forward references)

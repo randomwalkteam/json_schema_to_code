@@ -23,6 +23,8 @@ from .swift_ast_nodes import (
     SwiftProperty,
     SwiftStruct,
     SwiftUnionEnum,
+    decodes,
+    encodes,
 )
 
 
@@ -79,7 +81,7 @@ class SwiftSerializer:
         prefix = "nonisolated " if union.nonisolated else ""
         lines = [f"{prefix}enum {union.name}: {', '.join(union.conformances)} {{"]
         lines.extend(f"{i1}case {case.name}({case.type_name})" for case in union.cases)
-        if self._decodes(union.conformances):
+        if decodes(union.conformances):
             lines.append("")
             lines.append(f"{i1}init(from decoder: Decoder) throws {{")
             lines.append(f"{i2}let container = try decoder.singleValueContainer()")
@@ -92,7 +94,7 @@ class SwiftSerializer:
             lines.append(f'{i3}throw DecodingError.typeMismatch({union.name}.self, DecodingError.Context(codingPath: decoder.codingPath, debugDescription: "Expected one of {members}"))')
             lines.append(f"{i2}}}")
             lines.append(f"{i1}}}")
-        if self._encodes(union.conformances):
+        if encodes(union.conformances):
             lines.append("")
             lines.append(f"{i1}func encode(to encoder: Encoder) throws {{")
             lines.append(f"{i2}var container = encoder.singleValueContainer()")
@@ -102,14 +104,6 @@ class SwiftSerializer:
             lines.append(f"{i1}}}")
         lines.append("}")
         return lines
-
-    @staticmethod
-    def _decodes(conformances: list[str]) -> bool:
-        return any(c in ("Codable", "Decodable") for c in conformances)
-
-    @staticmethod
-    def _encodes(conformances: list[str]) -> bool:
-        return any(c in ("Codable", "Encodable") for c in conformances)
 
     def _serialize_poly_enum(self, poly: SwiftPolyEnum) -> list[str]:
         lines: list[str] = []
@@ -131,39 +125,49 @@ class SwiftSerializer:
         lines.append(f"{self.INDENT}}}")
         lines.append("")
 
-        # init(from:)
-        lines.append(f"{self.INDENT}init(from decoder: Decoder) throws {{")
-        lines.append(f"{self.INDENT}{self.INDENT}let container = try decoder.container(keyedBy: DiscriminatorKeys.self)")
-        lines.append(f"{self.INDENT}{self.INDENT}let discriminator = try container.decode(String.self, forKey: .discriminator)")
-        lines.append(f"{self.INDENT}{self.INDENT}switch discriminator {{")
-        for case in poly.cases:
-            lines.append(f'{self.INDENT}{self.INDENT}case "{case.discriminator_value}": self = .{case.name}(try {case.concrete_type}(from: decoder))')
-        lines.append(f"{self.INDENT}{self.INDENT}default:")
-        if poly.unknown_payload_type:
-            lines.append(f"{self.INDENT}{self.INDENT}{self.INDENT}self = .unknown(type: discriminator, payload: try {poly.unknown_payload_type}(from: decoder))")
-        else:
-            lines.append(
-                f"{self.INDENT}{self.INDENT}{self.INDENT}throw DecodingError.dataCorruptedError("
-                "forKey: .discriminator, in: container, "
-                f'debugDescription: "Unknown discriminator \\(discriminator) for {poly.name}")'
-            )
-        lines.append(f"{self.INDENT}{self.INDENT}}}")
-        lines.append(f"{self.INDENT}}}")
-        lines.append("")
-
-        # encode(to:) — only when the type actually encodes
-        if not any(c in ("Codable", "Encodable") for c in poly.conformances):
-            lines.append("}")
-            return lines
-        lines.append(f"{self.INDENT}func encode(to encoder: Encoder) throws {{")
-        lines.append(f"{self.INDENT}{self.INDENT}switch self {{")
-        for case in poly.cases:
-            lines.append(f"{self.INDENT}{self.INDENT}case .{case.name}(let value): try value.encode(to: encoder)")
-        if poly.unknown_payload_type:
-            lines.append(f"{self.INDENT}{self.INDENT}case .unknown(_, let payload): try payload.encode(to: encoder)")
-        lines.append(f"{self.INDENT}{self.INDENT}}}")
-        lines.append(f"{self.INDENT}}}")
+        if decodes(poly.conformances):
+            lines.extend(self._poly_decoder(poly))
+        if encodes(poly.conformances):
+            lines.extend(self._poly_encoder(poly))
+        if lines[-1] == "":
+            lines.pop()
         lines.append("}")
+        return lines
+
+    def _poly_decoder(self, poly: SwiftPolyEnum) -> list[str]:
+        """``init(from:)`` that decodes the case its discriminator names. With an
+        ``unknown`` case (policy decoding), the discriminator is read through the policy
+        container: a lenient decoder takes a missing or bad one as an unknown subtype."""
+        i1, i2, i3 = self.INDENT, self.INDENT * 2, self.INDENT * 3
+        lines = [f"{i1}init(from decoder: Decoder) throws {{"]
+        if poly.unknown_payload_type:
+            lines.append(f"{i2}let container = try decoder.policyContainer(keyedBy: DiscriminatorKeys.self)")
+            lines.append(f'{i2}let discriminator = try container.decodeRequired(String.self, forKey: .discriminator, fallback: "")')
+        else:
+            lines.append(f"{i2}let container = try decoder.container(keyedBy: DiscriminatorKeys.self)")
+            lines.append(f"{i2}let discriminator = try container.decode(String.self, forKey: .discriminator)")
+        lines.append(f"{i2}switch discriminator {{")
+        for case in poly.cases:
+            lines.append(f'{i2}case "{case.discriminator_value}": self = .{case.name}(try {case.concrete_type}(from: decoder))')
+        lines.append(f"{i2}default:")
+        if poly.unknown_payload_type:
+            lines.append(f"{i3}self = .unknown(type: discriminator, payload: try {poly.unknown_payload_type}(from: decoder))")
+        else:
+            lines.append(f'{i3}throw DecodingError.dataCorruptedError(forKey: .discriminator, in: container, debugDescription: "Unknown discriminator \\(discriminator) for {poly.name}")')
+        lines.append(f"{i2}}}")
+        lines.append(f"{i1}}}")
+        lines.append("")
+        return lines
+
+    def _poly_encoder(self, poly: SwiftPolyEnum) -> list[str]:
+        """``encode(to:)`` that encodes the associated value (or the kept payload)."""
+        i1, i2 = self.INDENT, self.INDENT * 2
+        lines = [f"{i1}func encode(to encoder: Encoder) throws {{", f"{i2}switch self {{"]
+        lines.extend(f"{i2}case .{case.name}(let value): try value.encode(to: encoder)" for case in poly.cases)
+        if poly.unknown_payload_type:
+            lines.append(f"{i2}case .unknown(_, let payload): try payload.encode(to: encoder)")
+        lines.append(f"{i2}}}")
+        lines.append(f"{i1}}}")
         return lines
 
     # ----------------------------------------------------------------- structs
@@ -204,8 +208,12 @@ class SwiftSerializer:
             lines.append(f"{prefix}extension {struct.name} {{")
             lines.append(f"{self.INDENT}init(from decoder: Decoder) throws {{")
             if struct.policy_decoding:
-                lines.append(f"{self.INDENT}{self.INDENT}let container = try decoder.policyContainer(keyedBy: CodingKeys.self)")
-                lines.extend(self._policy_decode_statement(p) for p in struct.properties if not p.is_const)
+                decoded = [p for p in struct.properties if not p.is_const]
+                # Opened even with nothing to decode: a strict decoder still checks the
+                # value is an object.
+                binding = "let container" if decoded else "_"
+                lines.append(f"{self.INDENT}{self.INDENT}{binding} = try decoder.policyContainer(keyedBy: CodingKeys.self)")
+                lines.extend(self._policy_decode_statement(p) for p in decoded)
             else:
                 lines.append(f"{self.INDENT}{self.INDENT}let container = try decoder.container(keyedBy: CodingKeys.self)")
                 for prop in struct.properties:
@@ -238,6 +246,8 @@ class SwiftSerializer:
         element = prop.element_type
         if prop.is_required:
             if prop.is_optional:
+                if element is not None:
+                    return body + f"decodeRequiredArray({element}.self, {key}, fallback: nil)"
                 return body + f"decodeRequired({prop.type_name}.self, {key}, fallback: nil)"
             if element is not None:
                 fallback = "" if prop.fallback in (None, "[]") else f", fallback: {prop.fallback}"

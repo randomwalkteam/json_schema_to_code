@@ -14,11 +14,13 @@ Generates Swift ``Codable`` structs/enums from the IR. Type model (see plan):
 The generated code references a JSON value type (``swift_any_type``, ``AnyCodable`` by
 default) for schema ``object`` / untyped ``Any``; the consuming Swift module must
 provide it once. With ``swift_policy_decoding`` it also calls the module's
-``policyContainer(keyedBy:)`` (see CLAUDE.md).
+``policyContainer(keyedBy:)`` (see README §Swift policy decoding).
 """
 
 from __future__ import annotations
 
+import os
+import re
 from typing import Any
 
 from ..analyzer.ir_nodes import IR, ClassDef, FieldDef, TypeKind, TypeRef
@@ -34,6 +36,8 @@ from .swift_ast_nodes import (
     SwiftStruct,
     SwiftUnionEnum,
     SwiftUnionEnumCase,
+    decodes,
+    encodes,
 )
 from .swift_serializer import SwiftSerializer
 
@@ -136,6 +140,8 @@ class SwiftAstBackend(AstBackend):
         self.class_field_map: dict[str, dict[str, FieldDef]] = {}
         # generated primitive unions, by name (filled while translating types)
         self.union_enums: dict[str, SwiftUnionEnum] = {}
+        # names of the schema's own types, which a generated union must not take
+        self.class_names: set[str] = set()
         self.any_type = config.swift_any_type
 
     # ------------------------------------------------------------------ generate
@@ -146,6 +152,7 @@ class SwiftAstBackend(AstBackend):
         self.enum_value_to_member = {}
         self.class_field_map = {}
         self.union_enums = {}
+        self.class_names = {c.name for c in ir.classes}
         for class_def in ir.classes:
             if class_def.is_enum and class_def.enum_def:
                 self.enum_value_to_member[class_def.name] = {json_value: self._enum_case_name(member) for member, json_value in class_def.enum_def.members.items()}
@@ -203,7 +210,7 @@ class SwiftAstBackend(AstBackend):
         for subtype_name, disc_value in class_def.subclasses:
             node.cases.append(
                 SwiftPolyEnumCase(
-                    name=self._swift_ident(self._lower_camel(subtype_name[len(prefix) :])),
+                    name=self._case_name(subtype_name[len(prefix) :]),
                     concrete_type=subtype_name,
                     discriminator_value=str(disc_value),
                 )
@@ -231,7 +238,8 @@ class SwiftAstBackend(AstBackend):
                 index_by_key[key] = len(ordered)
                 ordered.append(field)
 
-        needs_decoder = node.policy_decoding and self._conforms_to("Decodable")
+        conformances = node.conformances
+        needs_decoder = False
         for field in ordered:
             prop = self._generate_property(field)
             if prop is None:
@@ -240,13 +248,14 @@ class SwiftAstBackend(AstBackend):
             if prop.default_value is not None:
                 needs_decoder = True
             if node.policy_decoding and prop.is_required and prop.is_optional:
-                node.needs_custom_encoder = self._conforms_to("Encodable")
+                node.needs_custom_encoder = encodes(conformances)
 
-        node.needs_custom_decoder = needs_decoder
+        # With policy decoding every struct decodes through the policy container; an
+        # empty one has no CodingKeys and keeps the synthesized decoder.
+        if node.policy_decoding and node.properties:
+            needs_decoder = True
+        node.needs_custom_decoder = needs_decoder and decodes(conformances)
         return node
-
-    def _conforms_to(self, protocol: str) -> bool:
-        return protocol in self.config.swift_conformances or "Codable" in self.config.swift_conformances
 
     def _generate_property(self, field: FieldDef) -> SwiftProperty | None:
         if not field.type_ref:
@@ -286,9 +295,8 @@ class SwiftAstBackend(AstBackend):
             swift_type += "?"
 
         base_type = swift_type[:-1] if swift_type.endswith("?") else swift_type
-        element_type = None
-        if not override and field.type_ref.kind == TypeKind.ARRAY and base_type.startswith("[") and ":" not in base_type:
-            element_type = base_type[1:-1]
+        array_ref = None if override else self._array_ref(field.type_ref)
+        element_type = self.translate_type(array_ref.type_args[0]) if array_ref and array_ref.type_args else None
 
         return SwiftProperty(
             name=self._swift_ident(self._lower_camel(field.name)),
@@ -300,19 +308,41 @@ class SwiftAstBackend(AstBackend):
             is_required=field.is_required,
             is_const=field.is_const and default is not None,
             element_type=element_type,
-            fallback=None if is_optional else self._fallback(base_type, default),
+            fallback=None if is_optional else self._fallback(field.type_ref, base_type, default, override is not None),
         )
 
-    def _fallback(self, swift_type: str, default: str | None) -> str | None:
+    @staticmethod
+    def _array_ref(type_ref: TypeRef) -> TypeRef | None:
+        """The array type of a property, seen through nullability (``[T]?``)."""
+        if type_ref.kind == TypeKind.ARRAY:
+            return type_ref
+        if type_ref.kind in (TypeKind.UNION, TypeKind.OPTIONAL):
+            members = [t for t in type_ref.type_args if not (t.kind == TypeKind.PRIMITIVE and t.name == "null")]
+            if len(members) == 1 and members[0].kind == TypeKind.ARRAY:
+                return members[0]
+        return None
+
+    def _fallback(self, type_ref: TypeRef, swift_type: str, default: str | None, overridden: bool) -> str | None:
         """Literal a lenient decoder uses for a bad required value: the schema default,
-        else the zero value of a primitive or container. None for a generated type: the
-        policy container then decodes it from an empty object."""
+        else the zero value of the type (a primitive's, an empty container, an enum's
+        first case, a union's first member). None for a generated struct or
+        discriminated enum, which the policy container decodes from an empty object,
+        for the JSON value type, and for an ``x-swift-type`` the generator knows
+        nothing about."""
         if default is not None:
             return default
+        if overridden:
+            return None
+        if type_ref.kind == TypeKind.DICT:
+            return "[:]"
+        if self._array_ref(type_ref) is not None or type_ref.kind == TypeKind.TUPLE:
+            return "[]"
         if swift_type in self.ZERO_VALUES:
             return self.ZERO_VALUES[swift_type]
-        if swift_type.startswith("["):
-            return "[:]" if ":" in swift_type else "[]"
+        if swift_type in self.enum_value_to_member:
+            return f".{next(iter(self.enum_value_to_member[swift_type].values()))}"
+        if swift_type in self.union_enums:
+            return self._union_literal(self.union_enums[swift_type], None)
         return None
 
     # ---------------------------------------------------------------- type xlate
@@ -376,6 +406,8 @@ class SwiftAstBackend(AstBackend):
         if len(distinct) < 2 or any(m not in self.UNION_MEMBER_ORDER for m in distinct):
             return None
         name = "Or".join(distinct)
+        if name in self.class_names and name not in self.config.ignore_classes:
+            raise ValueError(f"The schema defines a type named {name}, the name of the generated union of {', '.join(distinct)}: rename the type, or list {name} in ignore_classes if it is that union")
         if name not in self.union_enums:
             self.union_enums[name] = SwiftUnionEnum(
                 name=name,
@@ -390,6 +422,9 @@ class SwiftAstBackend(AstBackend):
     def format_default_value(self, value: Any, type_ref: TypeRef | None) -> str:
         if value is None:
             return "nil"
+        union = self.union_enums.get(self.translate_type(type_ref).rstrip("?")) if type_ref else None
+        if union is not None:
+            return self._union_literal(union, value)
         if isinstance(value, bool):
             return "true" if value else "false"
         if isinstance(value, str):
@@ -406,6 +441,18 @@ class SwiftAstBackend(AstBackend):
         if isinstance(value, dict):
             return self._format_dict_default(value, type_ref)
         return str(value)
+
+    def _union_literal(self, union: SwiftUnionEnum, value: Any) -> str:
+        """``value`` as a case of a primitive union (``.int(3)``); with no value, the
+        first case holding its zero value."""
+        if value is None:
+            case = union.cases[0]
+            return f".{case.name}({self.ZERO_VALUES[case.type_name]})"
+        swift_type = {bool: "Bool", int: "Int", float: "Double", str: "String"}.get(type(value))
+        for case in union.cases:
+            if case.type_name == swift_type or (swift_type == "Int" and case.type_name == "Double"):
+                return f".{case.name}({self.format_default_value(value, None)})"
+        raise ValueError(f"Default {value!r} is not a member of {union.name}")
 
     def _format_list_default(self, value: list, type_ref: TypeRef | None) -> str:
         if not value:
@@ -442,31 +489,29 @@ class SwiftAstBackend(AstBackend):
     def _enum_case_name(self, member: str) -> str:
         # SCREAMING_SNAKE members (x-enum-members style, e.g. TYPE_CHANGE) lower-camel
         # per letter otherwise ("aDD"); normalize them to snake first -> typeChange.
-        import re
-
         if re.fullmatch(r"[A-Z0-9_]+", member):
             member = member.lower()
         return self._swift_ident(self._lower_camel(member))
 
     @staticmethod
     def _common_word_prefix(names: list[str]) -> str:
-        """The leading CamelCase words every name shares, when each name keeps at least
-        one word after it (``DHMChatInfo``, ``DHMError`` -> ``DHM``)."""
-        import re
-
+        """The longest leading text every name shares and after which each name goes on
+        with a capital letter (``DHMChatInfo``, ``DHMURLInfo``, ``DHMError`` -> ``DHM``;
+        ``ChatA``, ``ChatterB`` -> nothing)."""
         if len(names) < 2:
             return ""
-        split = [re.findall(r"[A-Z]+(?![a-z])|[A-Z][a-z0-9]*|[a-z0-9]+", n) for n in names]
-        if any("".join(words) != n for words, n in zip(split, names)):
-            return ""
-        prefix: list[str] = []
-        for words in zip(*split):
-            if len(set(words)) != 1:
-                break
-            prefix.append(words[0])
-        if any(len(words) <= len(prefix) for words in split):
-            prefix = prefix[: min(len(w) for w in split) - 1]
-        return "".join(prefix)
+        length = len(os.path.commonprefix(names))
+        while length > 0 and not all(len(n) > length and n[length].isupper() for n in names):
+            length -= 1
+        return names[0][:length]
+
+    def _case_name(self, type_name: str) -> str:
+        """A type name as an enum case: lowerCamelCase, a leading acronym in lower case
+        (``URLInfo`` -> ``urlInfo``, ``URL`` -> ``url``)."""
+        pascal = self._snake_to_pascal(type_name)
+        match = re.match(r"[A-Z]+(?=[A-Z][a-z])|[A-Z]+", pascal)
+        head = match.group(0) if match else ""
+        return self._swift_ident(head.lower() + pascal[len(head) :])
 
     def _lower_camel(self, text: str) -> str:
         pascal = self._snake_to_pascal(text)

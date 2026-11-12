@@ -5,6 +5,8 @@ discriminated enums keep unknown subtypes.
 Miniature of the dh-server message schema the mimir-ios app generates from.
 """
 
+import pytest
+
 from json_schema_to_code.pipeline.config import CodeGeneratorConfig
 from json_schema_to_code.pipeline.generator import PipelineGenerator
 from json_schema_to_code.tests.test_swift_ast_roundtrip import _swiftc_typecheck
@@ -55,7 +57,37 @@ MESSAGES_SCHEMA = {
 }
 
 
-def _generate(**overrides) -> str:
+# Shapes the message schema does not have.
+EDGE_SCHEMA = {
+    "$defs": {
+        "Mode": {"type": "string", "enum": ["fast", "slow"]},
+        "Edge": {
+            "type": "object",
+            "properties": {
+                "mode": {"$ref": "#/$defs/Mode"},
+                "key": {"type": ["string", "integer"]},
+                "weight": {"type": ["string", "integer"], "default": 3},
+                "label": {"type": ["string", "integer"], "default": "a"},
+                "grid": {"type": "array", "items": {"type": "array", "items": {"type": "integer"}}},
+                "marks": {"oneOf": [{"type": "array", "items": {"type": "integer"}}, {"type": "null"}]},
+                "names": {"type": "object", "additionalProperties": {"type": "string"}},
+            },
+            "required": ["mode", "key", "grid", "marks", "names"],
+        },
+        "Empty": {"type": "object", "properties": {}},
+        "Kind": {
+            "type": "object",
+            "discriminator": {"propertyName": "type"},
+            "properties": {"type": {"type": "string"}},
+            "required": ["type"],
+        },
+        "KindURLInfo": {"allOf": [{"$ref": "#/$defs/Kind"}, {"type": "object", "properties": {"type": {"type": "string", "const": "KindURLInfo"}}, "required": ["type"]}]},
+        "KindError": {"allOf": [{"$ref": "#/$defs/Kind"}, {"type": "object", "properties": {"type": {"type": "string", "const": "KindError"}}, "required": ["type"]}]},
+    },
+}
+
+
+def _config(**overrides) -> CodeGeneratorConfig:
     config = CodeGeneratorConfig()
     config.swift_conformances = ["Codable", "Hashable", "Sendable"]
     config.swift_nonisolated = True
@@ -64,7 +96,15 @@ def _generate(**overrides) -> str:
     config.add_generation_comment = False
     for key, value in overrides.items():
         setattr(config, key, value)
-    return PipelineGenerator("Messages", MESSAGES_SCHEMA, config, "swift").generate()
+    return config
+
+
+def _generate(**overrides) -> str:
+    return PipelineGenerator("Messages", MESSAGES_SCHEMA, _config(**overrides), "swift").generate()
+
+
+def _generate_edges(**overrides) -> str:
+    return PipelineGenerator("Edges", EDGE_SCHEMA, _config(**overrides), "swift").generate()
 
 
 def test_primitive_union_becomes_a_generated_enum():
@@ -98,12 +138,33 @@ def test_discriminated_enum_cases_drop_the_shared_prefix():
     assert "case profile(MsgProfile)" in code
 
 
+def test_case_names_keep_whole_words_and_lower_a_leading_acronym():
+    code = _generate_edges()
+    assert "case urlInfo(KindURLInfo)" in code
+    assert "case error(KindError)" in code
+
+
+def test_case_names_do_not_depend_on_policy_decoding():
+    code = _generate(swift_policy_decoding=False)
+    assert "case chatInfo(MsgChatInfo)" in code
+    assert "case unknown" not in code
+    assert "throw DecodingError.dataCorruptedError(forKey: .discriminator" in code
+
+
 def test_discriminated_enum_keeps_unknown_subtypes():
     code = _generate()
     assert "case unknown(type: String, payload: JSONValue)" in code
     assert "self = .unknown(type: discriminator, payload: try JSONValue(from: decoder))" in code
     assert "case .unknown(_, let payload): try payload.encode(to: encoder)" in code
     assert "Unknown discriminator" not in code
+
+
+def test_discriminator_is_read_through_the_policy_container():
+    # A lenient decoder takes a missing discriminator as an unknown subtype, so a
+    # required discriminated value has a fallback: the value decoded from an empty object.
+    code = _generate()
+    assert "let container = try decoder.policyContainer(keyedBy: DiscriminatorKeys.self)" in code
+    assert 'let discriminator = try container.decodeRequired(String.self, forKey: .discriminator, fallback: "")' in code
 
 
 def test_decoder_reads_through_the_policy_container():
@@ -135,6 +196,62 @@ def test_decode_calls_follow_the_schema():
     assert "self.nickname = try container.decodeOptional(String.self, forKey: .nickname)" in code
     assert "self.volume = try container.decodeOptional(Double.self, forKey: .volume, default: 1)" in code
     assert "self.payload = try container.decodeOptional(JSONValue.self, forKey: .payload)" in code
+
+
+def test_required_values_fall_back_to_the_zero_of_their_type():
+    code = _generate_edges()
+    assert "self.mode = try container.decodeRequired(Mode.self, forKey: .mode, fallback: .fast)" in code
+    assert "self.key = try container.decodeRequired(IntOrString.self, forKey: .key, fallback: .int(0))" in code
+    assert "self.names = try container.decodeRequired([String: String].self, forKey: .names, fallback: [:])" in code
+
+
+def test_nested_and_nullable_required_arrays_decode_element_by_element():
+    code = _generate_edges()
+    assert "self.grid = try container.decodeRequiredArray([Int].self, forKey: .grid)" in code
+    assert "self.marks = try container.decodeRequiredArray(Int.self, forKey: .marks, fallback: nil)" in code
+
+
+def test_union_default_is_a_case_of_the_union():
+    code = _generate_edges()
+    assert "var weight: IntOrString = .int(3)" in code
+    assert "self.weight = try container.decodeOptional(IntOrString.self, forKey: .weight, default: .int(3))" in code
+    assert 'var label: IntOrString = .string("a")' in code
+
+
+def test_union_default_without_policy_decoding():
+    code = _generate_edges(swift_policy_decoding=False)
+    assert "try container.decodeIfPresent(IntOrString.self, forKey: .weight) ?? .int(3)" in code
+
+
+def test_schema_type_named_like_a_generated_union_is_refused():
+    schema = {"$defs": {"IntOrString": {"type": "object", "properties": {"x": {"type": "integer"}}}, "Box": {"type": "object", "properties": {"v": {"type": ["string", "integer"]}}}}}
+    with pytest.raises(ValueError, match="IntOrString"):
+        PipelineGenerator("Box", schema, _config(), "swift").generate()
+
+
+def test_empty_struct_keeps_the_synthesized_decoder():
+    # It has no CodingKeys to open a policy container with.
+    code = _generate_edges()
+    assert "nonisolated struct Empty: Codable, Hashable, Sendable {\n}" in code
+    assert "extension Empty" not in code
+
+
+def test_struct_with_only_a_discriminator_opens_the_container_unbound():
+    code = _generate_edges()
+    decoder = code[code.index("extension KindError {") :]
+    assert decoder.startswith("extension KindError {\n    init(from decoder: Decoder) throws {\n        _ = try decoder.policyContainer(keyedBy: CodingKeys.self)\n    }")
+
+
+def test_encodable_only_types_have_no_decoder():
+    code = _generate(swift_conformances=["Encodable"])
+    assert "init(from decoder: Decoder)" not in code
+    assert "func encode(to encoder: Encoder)" in code
+
+
+def test_decodable_only_types_have_no_encoder():
+    code = _generate(swift_conformances=["Decodable"])
+    assert "init(from decoder: Decoder)" in code
+    assert "func encode(to encoder: Encoder)" not in code
 
 
 def test_property_keywords():
@@ -187,6 +304,9 @@ struct PolicyDecodingContainer<Key: CodingKey> {
     func decodeRequiredArray<T: Decodable>(_ type: T.Type, forKey key: Key, fallback: @autoclosure () -> [T] = []) throws -> [T] {
         try base.decode([T].self, forKey: key)
     }
+    func decodeRequiredArray<T: Decodable>(_ type: T.Type, forKey key: Key, fallback: @autoclosure () -> [T]?) throws -> [T]? {
+        try base.decode([T]?.self, forKey: key)
+    }
     func decodeOptionalArray<T: Decodable>(_ type: T.Type, forKey key: Key) throws -> [T]? {
         try base.decodeIfPresent([T].self, forKey: key)
     }
@@ -215,3 +335,7 @@ enum JSONValue: Codable, Hashable, Sendable {
 
 def test_generated_swift_typechecks_against_the_policy_container():
     _swiftc_typecheck(POLICY_CONTAINER, _generate())
+
+
+def test_generated_edge_cases_typecheck_against_the_policy_container():
+    _swiftc_typecheck(POLICY_CONTAINER, _generate_edges())
