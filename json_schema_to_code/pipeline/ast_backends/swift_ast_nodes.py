@@ -16,6 +16,16 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 
+def decodes(conformances: list[str]) -> bool:
+    """Whether a type with these conformances needs ``init(from:)``."""
+    return any(c in ("Codable", "Decodable") for c in conformances)
+
+
+def encodes(conformances: list[str]) -> bool:
+    """Whether a type with these conformances needs ``encode(to:)``."""
+    return any(c in ("Codable", "Encodable") for c in conformances)
+
+
 @dataclass
 class SwiftNode:
     """Base class for all Swift AST nodes."""
@@ -38,6 +48,11 @@ class SwiftProperty(SwiftNode):
     is_optional: bool = False
     default_value: str | None = None
     comment: str | None = None
+    # Policy decoding (``swift_policy_decoding``) only:
+    is_required: bool = False  # the schema lists the key in ``required``
+    is_const: bool = False  # a discriminator constant: a ``let`` with its value, never decoded
+    element_type: str | None = None  # element type when the property is an array
+    fallback: str | None = None  # literal a lenient decoder uses for a bad required value
 
 
 @dataclass
@@ -71,6 +86,11 @@ class SwiftStruct(SwiftNode):
     # Emit a custom init(from:) (in an extension) so property defaults are applied
     # for missing keys -- Swift's synthesized Codable ignores property defaults.
     needs_custom_decoder: bool = False
+    # Decode through the consuming module's ``policyContainer`` (``swift_policy_decoding``).
+    policy_decoding: bool = False
+    # Emit ``encode(to:)``: a required nullable property must encode ``null``, which the
+    # synthesized encoder (``encodeIfPresent``) leaves out.
+    needs_custom_encoder: bool = False
     comment: str | None = None
 
 
@@ -98,6 +118,28 @@ class SwiftPolyEnum(SwiftNode):
     comment: str | None = None
     conformances: list[str] = field(default_factory=lambda: ["Codable"])
     nonisolated: bool = False
+    # When set, an unknown discriminator decodes to ``unknown(type:payload:)`` with the
+    # whole object kept as this JSON value type, instead of throwing.
+    unknown_payload_type: str | None = None
+
+
+@dataclass
+class SwiftUnionEnumCase(SwiftNode):
+    """One member of a union of primitive types."""
+
+    name: str = ""  # case identifier (lowerCamelCase of the Swift type, e.g. ``int``)
+    type_name: str = ""  # Swift primitive type (``Int``, ``String`` ...)
+
+
+@dataclass
+class SwiftUnionEnum(SwiftNode):
+    """A union of primitive JSON types (e.g. ``string | integer``) as an enum with
+    associated values, decoded by trying each member in turn (``IntOrString``)."""
+
+    name: str = ""
+    cases: list[SwiftUnionEnumCase] = field(default_factory=list)
+    conformances: list[str] = field(default_factory=lambda: ["Codable"])
+    nonisolated: bool = False
 
 
 @dataclass
@@ -107,5 +149,6 @@ class SwiftFile(SwiftNode):
     generation_comment: str = ""
     imports: list[str] = field(default_factory=lambda: ["Foundation"])
     enums: list[SwiftEnum] = field(default_factory=list)
+    union_enums: list[SwiftUnionEnum] = field(default_factory=list)
     poly_enums: list[SwiftPolyEnum] = field(default_factory=list)
     structs: list[SwiftStruct] = field(default_factory=list)

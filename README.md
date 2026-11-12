@@ -122,6 +122,8 @@ Unknown keys are skipped with a warning, so a config file can carry options for 
 
 - **`swift_conformances`** (default `["Codable"]`): Protocols the generated structs and enums conform to, e.g. `["Decodable", "Hashable", "Sendable"]` for a decode-only, strict-concurrency project
 - **`swift_nonisolated`** (default `false`): Prefix generated types with `nonisolated`, and restate it on the `init(from:)` extension — needed under default-MainActor isolation
+- **`swift_any_type`** (default `"AnyCodable"`): The JSON value type the project supplies for schema `object` / untyped values (e.g. `"JSONValue"`)
+- **`swift_policy_decoding`** (default `false`): Decode through a container the project supplies, which decides at run time whether a schema mismatch throws (strict) or falls back (lenient) — see [Swift policy decoding](#swift-policy-decoding)
 
 **External references**
 
@@ -407,9 +409,28 @@ with open('output.py', 'w') as f:
 ### Swift Output
 - Generates `struct`s with an explicit `CodingKeys` enum, conforming to whatever `swift_conformances` lists (`Codable` by default)
 - String enums become raw-value `Codable` enums
-- Schema `object` / untyped values map to an `AnyCodable` helper the project must supply
+- Schema `object` / untyped values map to an `AnyCodable` helper the project must supply (`swift_any_type` names another)
+- A union of primitive types (`"type": ["string", "integer"]`, or the members of a variable-length tuple) becomes a generated enum with one case per member, `enum IntOrString { case int(Int); case string(String) }`, decoded by trying Bool, Int, Double, String in that order. A project that already defines the type lists it in `ignore_classes`
+- A discriminated base (`oneOf` of `$ref`s, or an `allOf` base carrying `"discriminator": {"propertyName": ...}`) becomes an enum with associated values; the subtype names' shared leading words are dropped from the case names (`DHMChatInfo`, `DHMError` → `case chatInfo`, `case error`)
 - **Decoding is deliberately lenient**: a field with a schema default emits as `var x = default` plus `decodeIfPresent ?? default`, and a non-required field with neither default nor nullability becomes optional. One absent or unexpected field cannot throw away an entire payload — which matters when the server is free to add fields ahead of the client.
 - Defaults declared on a base class survive `allOf` flattening, including across external `$ref`s (Swift only; C#/Python constructor signatures are untouched)
+
+### Swift policy decoding
+
+With `swift_policy_decoding`, the generated code leaves the decoding decision to the project: strict where a mismatch with the server should surface (development builds), lenient where it must not cost a whole payload (production). Every `init(from:)` opens `try decoder.policyContainer(keyedBy: CodingKeys.self)` and calls, per property:
+
+| Property | Call |
+|---|---|
+| required | `decodeRequired(T.self, forKey:, fallback: x)`, with `x` the schema default or the type's zero value (`""`, `0`, `false`, `[:]`, an enum's first case, a primitive union's first member holding its zero value); without `fallback:` for a generated struct, a discriminated enum and the JSON value type |
+| required, nullable | `decodeRequired(T?.self, forKey:, fallback: nil)`, and an `encode(to:)` that writes `null` |
+| required array | `decodeRequiredArray(E.self, forKey:)`, or `decodeRequiredArray(E.self, forKey:, fallback: x)` with a schema default |
+| required nullable array | `decodeRequiredArray(E.self, forKey:, fallback: nil)` |
+| optional | `decodeOptional(T.self, forKey:)`, or `decodeOptional(T.self, forKey:, default: x)` |
+| optional array | `decodeOptionalArray(E.self, forKey:)`, or with `default:` |
+
+A discriminator constant is `let type: String = "X"`, encoded but never decoded. Optional properties are `var`, so the memberwise initializer defaults them to `nil`. A discriminated enum gains `case unknown(type: String, payload: <swift_any_type>)`, so a subtype the client does not know yet never fails the decode; it reads its discriminator with `decodeRequired(String.self, forKey:, fallback: "")`, so a lenient decoder takes a missing one as an unknown subtype too. A struct with no property keeps the synthesized decoder.
+
+The project supplies `policyContainer(keyedBy:)` on `Decoder` and a container with these eight methods (the two `decodeRequired`, the two `decodeOptional`, and the four array variants). A strict container maps them to `decode` / `decodeIfPresent`; a lenient one returns the fallback, `nil` or the default for a missing or bad value, drops bad array elements, and decodes a generated type it cannot read from an empty object. The mimir-ios app's `PolicyDecoding.swift` is a complete implementation, strict in Debug and Staging and lenient in Production.
 
 ## Architecture
 

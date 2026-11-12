@@ -95,6 +95,8 @@ json_schema_to_code <schema.json> <output_file> [options]
 
 **Backends**: `PythonAstBackend`, `CSharpAstBackend`, `SwiftAstBackend`. Each reads its own key from `TypeRef.type_overrides` (`python`, `csharp`, `swift`) in `translate_type`.
 
+The Swift backend turns a union of primitive types into a generated enum (`IntOrString`, collected while translating types, skipped when named in `ignore_classes`) and a discriminated base into an enum whose case names drop the subtypes' shared leading words. With `swift_policy_decoding` the serializer emits the `policyContainer` calls documented in README §Swift policy decoding; the project owns that API.
+
 The Python backend decides defaults from the IR alone: a non-required class-typed field gets `field(default_factory=lambda: X())` only when `X` is empty-constructible (every field, inherited ones included, has a default; enums never are), else `None` with the annotation widened to `X | None`. The IR is not mutated for this.
 
 ### Phase 4: Serialization
@@ -130,6 +132,8 @@ The Python backend decides defaults from the IR alone: a non-required class-type
 | `add_validation` | `bool` | `false` | Add runtime validation |
 | `swift_conformances` | `list[str]` | `["Codable"]` | Protocols generated Swift types conform to |
 | `swift_nonisolated` | `bool` | `false` | Prefix generated Swift types with `nonisolated` |
+| `swift_any_type` | `str` | `"AnyCodable"` | Swift type for schema `object` / untyped values |
+| `swift_policy_decoding` | `bool` | `false` | Decode through the project's `policyContainer` (strict or lenient at run time); discriminated enums gain `unknown(type:payload:)` |
 | `external_ref_base_module` | `str` | `""` | Base module for external `$ref` imports (Python) |
 | `external_ref_schema_to_module` | `dict[str,str]` | `{}` | Schema path -> module mapping |
 | `csharp_namespace` | `str` | `""` | C# namespace |
@@ -302,6 +306,7 @@ The analyzer raises fatal errors for invalid schema patterns:
 | `test_optional_field_defaults.py`, `test_omit_when_default.py`, `test_python_base_and_type_overrides.py` | Python runtime behaviour, by executing the generated module |
 | `test_external_base_class_imports.py` | External `$ref` import resolution |
 | `test_csharp_ast_roundtrip.py`, `test_swift_ast_roundtrip.py` | tree-sitter parsing and merging |
+| `test_swift_policy_decoding.py` | Swift policy decoding, primitive-union enums, discriminated enum case names and `unknown` |
 | `test_config_from_dict.py`, `test_import_sorting.py` | Config loading, ruff isort pass |
 | `test_validation_rules.py` | Validation rule generation |
 | `test_cli_utils.py` | CLI utility functions |

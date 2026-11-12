@@ -40,5 +40,27 @@ class TestCliUtils:
         assert "json_schema_to_code" in result
 
 
+def test_header_names_files_the_same_on_first_and_later_runs(tmp_path):
+    """The header written into a new output file equals the one a regeneration writes:
+    file paths show as file names, whether or not the file existed."""
+    from click.testing import CliRunner
+
+    from json_schema_to_code.json_schema_to_code import json_schema_to_code
+
+    schema = tmp_path / "schemas" / "point.json"
+    schema.parent.mkdir()
+    schema.write_text('{"$defs": {"Point": {"type": "object", "properties": {"x": {"type": "integer"}}}}}')
+    output = tmp_path / "out" / "Point.swift"
+    output.parent.mkdir()
+    runner = CliRunner()
+    headers = []
+    for _ in range(2):
+        result = runner.invoke(json_schema_to_code, [str(schema), str(output), "-l", "swift"])
+        assert result.exit_code == 0, result.output
+        headers.append(output.read_text().splitlines()[0])
+    assert headers[0] == headers[1]
+    assert headers[0].endswith(": json_schema_to_code point.json Point.swift --language swift")
+
+
 if __name__ == "__main__":
     pytest.main([__file__])

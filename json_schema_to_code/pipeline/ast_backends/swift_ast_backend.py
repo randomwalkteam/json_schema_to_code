@@ -8,12 +8,19 @@ Generates Swift ``Codable`` structs/enums from the IR. Type model (see plan):
   switches on the discriminator in ``init(from:)``.
 - String enums -> raw-value ``Codable`` enums (Swift maps raw value <-> JSON for free).
 
-The generated code references an ``AnyCodable`` helper type (for schema ``object`` /
-untyped ``Any``); the consuming Swift module must provide it once.
+- Unions of primitive types (``string | integer``) -> a generated enum with one case
+  per member (``IntOrString``).
+
+The generated code references a JSON value type (``swift_any_type``, ``AnyCodable`` by
+default) for schema ``object`` / untyped ``Any``; the consuming Swift module must
+provide it once. With ``swift_policy_decoding`` it also calls the module's
+``policyContainer(keyedBy:)`` (see README §Swift policy decoding).
 """
 
 from __future__ import annotations
 
+import os
+import re
 from typing import Any
 
 from ..analyzer.ir_nodes import IR, ClassDef, FieldDef, TypeKind, TypeRef
@@ -27,6 +34,10 @@ from .swift_ast_nodes import (
     SwiftPolyEnumCase,
     SwiftProperty,
     SwiftStruct,
+    SwiftUnionEnum,
+    SwiftUnionEnumCase,
+    decodes,
+    encodes,
 )
 from .swift_serializer import SwiftSerializer
 
@@ -104,16 +115,20 @@ class SwiftAstBackend(AstBackend):
         "boolean": "Bool",
         "number": "Double",
         "null": "Void",
-        "object": "AnyCodable",
         # Normalized/native spellings (base-class fields surface these, e.g. "int"/"bool")
         "int": "Int",
         "str": "String",
         "bool": "Bool",
         "float": "Double",
         "double": "Double",
-        "any": "AnyCodable",
-        "Any": "AnyCodable",
     }
+
+    # Decoding order of a primitive union: a JSON number that is an integer decodes as
+    # Int before Double; Bool and String never overlap the others.
+    UNION_MEMBER_ORDER = ["Bool", "Int", "Double", "String"]
+
+    # Literal a lenient policy decoder falls back to for a bad required primitive.
+    ZERO_VALUES = {"String": '""', "Int": "0", "Double": "0", "Bool": "false"}
 
     def __init__(self, config: CodeGeneratorConfig):
         super().__init__(config)
@@ -123,6 +138,11 @@ class SwiftAstBackend(AstBackend):
         self.enum_value_to_member: dict[str, dict[Any, str]] = {}
         # class name -> {json_key: FieldDef} (for struct-typed default initializers)
         self.class_field_map: dict[str, dict[str, FieldDef]] = {}
+        # generated primitive unions, by name (filled while translating types)
+        self.union_enums: dict[str, SwiftUnionEnum] = {}
+        # names of the schema's own types, which a generated union must not take
+        self.class_names: set[str] = set()
+        self.any_type = config.swift_any_type
 
     # ------------------------------------------------------------------ generate
 
@@ -131,6 +151,8 @@ class SwiftAstBackend(AstBackend):
         self.enum_names = {c.name for c in ir.classes if c.is_enum}
         self.enum_value_to_member = {}
         self.class_field_map = {}
+        self.union_enums = {}
+        self.class_names = {c.name for c in ir.classes}
         for class_def in ir.classes:
             if class_def.is_enum and class_def.enum_def:
                 self.enum_value_to_member[class_def.name] = {json_value: self._enum_case_name(member) for member, json_value in class_def.enum_def.members.items()}
@@ -149,6 +171,7 @@ class SwiftAstBackend(AstBackend):
                 file.poly_enums.append(self._generate_poly_enum(class_def))
             else:
                 file.structs.append(self._generate_struct(class_def))
+        file.union_enums = [u for name, u in sorted(self.union_enums.items()) if name not in self.config.ignore_classes]
 
         return self.serializer.serialize(file)
 
@@ -181,11 +204,13 @@ class SwiftAstBackend(AstBackend):
             discriminator_key=disc_key,
             conformances=list(self.config.swift_conformances),
             nonisolated=self.config.swift_nonisolated,
+            unknown_payload_type=self.any_type if self.config.swift_policy_decoding else None,
         )
+        prefix = self._common_word_prefix([name for name, _ in class_def.subclasses])
         for subtype_name, disc_value in class_def.subclasses:
             node.cases.append(
                 SwiftPolyEnumCase(
-                    name=self._swift_ident(self._lower_camel(subtype_name)),
+                    name=self._case_name(subtype_name[len(prefix) :]),
                     concrete_type=subtype_name,
                     discriminator_value=str(disc_value),
                 )
@@ -197,6 +222,7 @@ class SwiftAstBackend(AstBackend):
             name=class_def.name,
             conformances=list(self.config.swift_conformances),
             nonisolated=self.config.swift_nonisolated,
+            policy_decoding=self.config.swift_policy_decoding,
         )
 
         # Flatten base fields + own fields; own fields override base fields by JSON key.
@@ -212,6 +238,7 @@ class SwiftAstBackend(AstBackend):
                 index_by_key[key] = len(ordered)
                 ordered.append(field)
 
+        conformances = node.conformances
         needs_decoder = False
         for field in ordered:
             prop = self._generate_property(field)
@@ -220,8 +247,14 @@ class SwiftAstBackend(AstBackend):
             node.properties.append(prop)
             if prop.default_value is not None:
                 needs_decoder = True
+            if node.policy_decoding and prop.is_required and prop.is_optional:
+                node.needs_custom_encoder = encodes(conformances)
 
-        node.needs_custom_decoder = needs_decoder
+        # With policy decoding every struct decodes through the policy container; an
+        # empty one has no CodingKeys and keeps the synthesized decoder.
+        if node.policy_decoding and node.properties:
+            needs_decoder = True
+        node.needs_custom_decoder = needs_decoder and decodes(conformances)
         return node
 
     def _generate_property(self, field: FieldDef) -> SwiftProperty | None:
@@ -248,7 +281,7 @@ class SwiftAstBackend(AstBackend):
         # Bare `AnyCodable` (schema object/Any) has no compile-time literal default. Drop the
         # default and make the property optional so a missing key decodes to nil (tolerant).
         base_type = swift_type[:-1] if swift_type.endswith("?") else swift_type
-        if base_type == "AnyCodable" and default is not None:
+        if base_type == self.any_type and default is not None:
             default = None
             is_optional = True
             if not swift_type.endswith("?"):
@@ -261,6 +294,10 @@ class SwiftAstBackend(AstBackend):
             is_optional = True
             swift_type += "?"
 
+        base_type = swift_type[:-1] if swift_type.endswith("?") else swift_type
+        array_ref = None if override else self._array_ref(field.type_ref)
+        element_type = self.translate_type(array_ref.type_args[0]) if array_ref and array_ref.type_args else None
+
         return SwiftProperty(
             name=self._swift_ident(self._lower_camel(field.name)),
             type_name=swift_type,
@@ -268,7 +305,45 @@ class SwiftAstBackend(AstBackend):
             is_optional=is_optional,
             default_value=default,
             comment=field.comment,
+            is_required=field.is_required,
+            is_const=field.is_const and default is not None,
+            element_type=element_type,
+            fallback=None if is_optional else self._fallback(field.type_ref, base_type, default, override is not None),
         )
+
+    @staticmethod
+    def _array_ref(type_ref: TypeRef) -> TypeRef | None:
+        """The array type of a property, seen through nullability (``[T]?``)."""
+        if type_ref.kind == TypeKind.ARRAY:
+            return type_ref
+        if type_ref.kind in (TypeKind.UNION, TypeKind.OPTIONAL):
+            members = [t for t in type_ref.type_args if not (t.kind == TypeKind.PRIMITIVE and t.name == "null")]
+            if len(members) == 1 and members[0].kind == TypeKind.ARRAY:
+                return members[0]
+        return None
+
+    def _fallback(self, type_ref: TypeRef, swift_type: str, default: str | None, overridden: bool) -> str | None:
+        """Literal a lenient decoder uses for a bad required value: the schema default,
+        else the zero value of the type (a primitive's, an empty container, an enum's
+        first case, a union's first member). None for a generated struct or
+        discriminated enum, which the policy container decodes from an empty object,
+        for the JSON value type, and for an ``x-swift-type`` the generator knows
+        nothing about."""
+        if default is not None:
+            return default
+        if overridden:
+            return None
+        if type_ref.kind == TypeKind.DICT:
+            return "[:]"
+        if self._array_ref(type_ref) is not None or type_ref.kind == TypeKind.TUPLE:
+            return "[]"
+        if swift_type in self.ZERO_VALUES:
+            return self.ZERO_VALUES[swift_type]
+        if swift_type in self.enum_value_to_member:
+            return f".{next(iter(self.enum_value_to_member[swift_type].values()))}"
+        if swift_type in self.union_enums:
+            return self._union_literal(self.union_enums[swift_type], None)
+        return None
 
     # ---------------------------------------------------------------- type xlate
 
@@ -284,24 +359,26 @@ class SwiftAstBackend(AstBackend):
             return override
         kind = type_ref.kind
         if kind == TypeKind.PRIMITIVE:
+            if type_ref.name in ("object", "any", "Any"):
+                return self.any_type
             return self.TYPE_MAP.get(type_ref.name, type_ref.name)
         if kind == TypeKind.CLASS:
             return type_ref.name
         if kind == TypeKind.ANY:
-            return "AnyCodable"
+            return self.any_type
         if kind == TypeKind.DICT:
             if len(type_ref.type_args) == 2:
                 key = self.translate_type(type_ref.type_args[0])
                 value = self.translate_type(type_ref.type_args[1])
                 return f"[{key}: {value}]"
-            return "[String: AnyCodable]"
+            return f"[String: {self.any_type}]"
         if kind == TypeKind.ARRAY:
             if type_ref.type_args:
                 return f"[{self.translate_type(type_ref.type_args[0])}]"
-            return "[AnyCodable]"
+            return f"[{self.any_type}]"
         if kind == TypeKind.TUPLE:
             # Swift tuples are not Codable; represent as a heterogeneous array.
-            return "[AnyCodable]"
+            return f"[{self.any_type}]"
         if kind == TypeKind.UNION:
             types = [self.translate_type(t) for t in type_ref.type_args]
             non_null = [t for t in types if t not in ("Void", "null")]
@@ -311,20 +388,43 @@ class SwiftAstBackend(AstBackend):
                 if has_null and not base.endswith("?"):
                     return f"{base}?"
                 return base
-            # Heterogeneous union with no generated poly-enum -> AnyCodable.
-            return "AnyCodable"
+            union = self._primitive_union(non_null)
+            if union:
+                return f"{union}?" if has_null else union
+            # Heterogeneous union with no generated poly-enum -> the JSON value type.
+            return self.any_type
         if kind == TypeKind.CONST:
             return self.TYPE_MAP.get(type_ref.name, type_ref.name)
         if kind == TypeKind.ENUM:
             # Inline enum (no generated type) -> raw String, like the C# backend.
             return "String"
-        return "AnyCodable"
+        return self.any_type
+
+    def _primitive_union(self, members: list[str]) -> str | None:
+        """Name of the generated enum for a union of primitive types, registering it."""
+        distinct = sorted(set(members))
+        if len(distinct) < 2 or any(m not in self.UNION_MEMBER_ORDER for m in distinct):
+            return None
+        name = "Or".join(distinct)
+        if name in self.class_names and name not in self.config.ignore_classes:
+            raise ValueError(f"The schema defines a type named {name}, the name of the generated union of {', '.join(distinct)}: rename the type, or list {name} in ignore_classes if it is that union")
+        if name not in self.union_enums:
+            self.union_enums[name] = SwiftUnionEnum(
+                name=name,
+                cases=[SwiftUnionEnumCase(name=self._swift_ident(t.lower()), type_name=t) for t in self.UNION_MEMBER_ORDER if t in distinct],
+                conformances=list(self.config.swift_conformances),
+                nonisolated=self.config.swift_nonisolated,
+            )
+        return name
 
     # ------------------------------------------------------------- default values
 
     def format_default_value(self, value: Any, type_ref: TypeRef | None) -> str:
         if value is None:
             return "nil"
+        union = self.union_enums.get(self.translate_type(type_ref).rstrip("?")) if type_ref else None
+        if union is not None:
+            return self._union_literal(union, value)
         if isinstance(value, bool):
             return "true" if value else "false"
         if isinstance(value, str):
@@ -341,6 +441,18 @@ class SwiftAstBackend(AstBackend):
         if isinstance(value, dict):
             return self._format_dict_default(value, type_ref)
         return str(value)
+
+    def _union_literal(self, union: SwiftUnionEnum, value: Any) -> str:
+        """``value`` as a case of a primitive union (``.int(3)``); with no value, the
+        first case holding its zero value."""
+        if value is None:
+            case = union.cases[0]
+            return f".{case.name}({self.ZERO_VALUES[case.type_name]})"
+        swift_type = {bool: "Bool", int: "Int", float: "Double", str: "String"}.get(type(value))
+        for case in union.cases:
+            if case.type_name == swift_type or (swift_type == "Int" and case.type_name == "Double"):
+                return f".{case.name}({self.format_default_value(value, None)})"
+        raise ValueError(f"Default {value!r} is not a member of {union.name}")
 
     def _format_list_default(self, value: list, type_ref: TypeRef | None) -> str:
         if not value:
@@ -377,11 +489,29 @@ class SwiftAstBackend(AstBackend):
     def _enum_case_name(self, member: str) -> str:
         # SCREAMING_SNAKE members (x-enum-members style, e.g. TYPE_CHANGE) lower-camel
         # per letter otherwise ("aDD"); normalize them to snake first -> typeChange.
-        import re
-
         if re.fullmatch(r"[A-Z0-9_]+", member):
             member = member.lower()
         return self._swift_ident(self._lower_camel(member))
+
+    @staticmethod
+    def _common_word_prefix(names: list[str]) -> str:
+        """The longest leading text every name shares and after which each name goes on
+        with a capital letter (``DHMChatInfo``, ``DHMURLInfo``, ``DHMError`` -> ``DHM``;
+        ``ChatA``, ``ChatterB`` -> nothing)."""
+        if len(names) < 2:
+            return ""
+        length = len(os.path.commonprefix(names))
+        while length > 0 and not all(len(n) > length and n[length].isupper() for n in names):
+            length -= 1
+        return names[0][:length]
+
+    def _case_name(self, type_name: str) -> str:
+        """A type name as an enum case: lowerCamelCase, a leading acronym in lower case
+        (``URLInfo`` -> ``urlInfo``, ``URL`` -> ``url``)."""
+        pascal = self._snake_to_pascal(type_name)
+        match = re.match(r"[A-Z]+(?=[A-Z][a-z])|[A-Z]+", pascal)
+        head = match.group(0) if match else ""
+        return self._swift_ident(head.lower() + pascal[len(head) :])
 
     def _lower_camel(self, text: str) -> str:
         pascal = self._snake_to_pascal(text)

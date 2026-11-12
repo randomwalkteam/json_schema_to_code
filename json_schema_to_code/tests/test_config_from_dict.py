@@ -143,6 +143,8 @@ def _fully_populated() -> CodeGeneratorConfig:
         add_generation_comment=False,
         swift_conformances=["Decodable", "Sendable"],
         swift_nonisolated=True,
+        swift_any_type="JSONValue",
+        swift_policy_decoding=True,
         quoted_types_for_python=["Node"],
         use_future_annotations=False,
         exclude_default_value_from_json=True,
